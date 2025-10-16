@@ -1,0 +1,243 @@
+:root { --dialog-width: 88ch; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  margin: 0;
+  background-color: #000;
+  color: #fff;
+  min-height: 100vh;
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  transition: background-image 0.4s ease-in-out, background-size 0.2s ease-in-out;
+}
+
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: rgba(0,0,0,0.65);
+  padding: 12px 16px;
+  border-radius: 8px;
+  color: #fff;
+  margin: 16px;
+  position: relative; /* ensure z-index takes effect */
+  z-index: 12; /* above foreground image layer */
+}
+
+@font-face {
+  font-family: 'Barlow';
+  src: url('BarlowSemiCondensed-SemiBold.ttf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+select, button {
+  padding: 6px 8px;
+  font-size: 14px;
+  background: rgba(255,255,255,0.9);
+  color: #000;
+  border: 1px solid rgba(0,0,0,0.3);
+}
+
+
+/* Dialog container anchored to bottom center */
+
+.character-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+.character-slot {
+  position: absolute;
+  bottom: -170px;
+  /* translate by per-slot offsets (smart vshift disabled) */
+  transform: translate(calc(-50% + var(--slot-offset-x, 0px)), var(--slot-offset-y, 0px));
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--fade-time, 0.25s) ease;
+  z-index: 1; /* base stacking */
+}
+.character-slot--left { left: 35%; }
+.character-slot--center { left: 50%; z-index: 1; }
+.character-slot--right { left: 65%; }
+.character-slot--left, .character-slot--right { z-index: 2; }
+.character-slot.is-visible {
+  opacity: 1;
+  visibility: visible;
+}
+.character-slot.is-dimmed { filter: grayscale(75%); }
+.character-slot img {
+  /* Size/position driven by per-sprite variables from sprite-assets.css */
+  width: var(--sprite-width, auto);
+  height: var(--sprite-height, auto);
+  max-width: none;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 18px 32px rgba(0,0,0,0.5));
+  /* Default pivot is feet at center */
+  transform-origin: center;
+  /* base zoom (user-set) multiplied by per-[charslot] zoom */
+  --sprite-zoom: 1.4;           /* user-configurable base zoom */
+  --sprite-zoom-extra: 1;        /* per-[charslot] zoom multiplier */
+  /* optional per-sprite offsets; positive Y moves down */
+  --sprite-translate-x: 0px;
+  --sprite-translate-y: 0px;
+  transform:
+    translate(var(--sprite-translate-x), var(--sprite-translate-y))
+    scale(calc(var(--sprite-zoom, 1) * var(--sprite-zoom-extra, 1)));
+}
+
+#current {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 72px; /* space for controls */
+  border: none;
+  padding: 0;
+  margin-top: 12px;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: auto;
+  z-index: 10;
+}
+/* Speaker name outside the dialog, left-aligned above it */
+#current .name {
+  font-weight: 600;
+  margin-bottom: 6px;
+  width: var(--dialog-width);
+  max-width: min(90vw, var(--dialog-width));
+  text-align: left;
+}
+/* The dialog box with fixed character width and wrapping */
+#current .dialog {
+  font-family: Barlow;
+  font-size: 20px;
+  background: transparent;
+  color: gainsboro;
+  padding: 12px 16px;
+  width: var(--dialog-width);
+  max-width: min(90vw, var(--dialog-width));
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere; /* wrap long words */
+}
+/* Text reveal: typewriter-friendly helpers */
+#current .dialog { overflow: hidden; }
+#current .dialog .text { display: block; }
+#current .dialog .text .tw-char { visibility: hidden; }
+#current .dialog .text .tw-char.is-on { visibility: visible; }
+@media (prefers-reduced-motion: reduce) {
+  #current .dialog .text .tw-char { visibility: visible; }
+}
+#controls {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 16px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  width: var(--dialog-width);
+  max-width: min(90vw, var(--dialog-width));
+  z-index: 11;
+  padding: 12px 16px;
+  border-radius: 8px;
+}
+#progress { margin-left: 8px; }
+
+/* Hide inline full history; it will be shown in a modal instead */
+#list { display: none; }
+.line { padding: 6px 0; border-bottom: 1px solid #f2f2f2; }
+.line .name { font-weight: 600; margin-right: 6px; }
+.line.image-change { font-style: italic; color: rgba(255,255,255,0.7); }
+.line.audio-change { font-style: italic; color: rgba(144,205,255,0.75); }
+.muted { color: rgba(255,255,255,0.75); }
+#choices { margin-top: 10px; display: none; gap: 8px; flex-wrap: wrap; }
+#choices button { padding: 6px 10px; font-size: 14px; cursor: pointer; }
+.line.decision { color: #444; font-style: italic; }
+
+/* Modal styles for history log */
+#logModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+#logModal .modal-content {
+  background: #fff;
+  color: #000;
+  width: min(900px, 90vw);
+  max-height: 80vh;
+  overflow: auto;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+}
+#logModal .modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border-bottom: 1px solid #eee;
+}
+#logModal .modal-body {
+  padding: 12px;
+}
+#logModal .close-btn { cursor: pointer; }
+#logModal .line { cursor: pointer; padding: 8px 4px; }
+#logModal .line:hover { background: #f6f6f6; }
+#logModal .line.image-change { color: #444; }
+#logModal .line.audio-change { color: #2c3e50; }
+#logModal .muted { color: #666; }
+/* Highlight for the current story line in the log */
+#logModal .line.is-current { background: #e8f4ff; outline: 1px solid #6aa8ff; }
+
+/* Vignette overlay: top and bottom shadows, anchored to dialog visibility */
+#vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8; /* above images (3-5), below blocker (9) and dialog (10) */
+  opacity: 1;
+  transition: opacity 1s ease;
+}
+#vignette::before,
+#vignette::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+}
+#vignette::before {
+  top: 0;
+  height: 14vh; /* top: lighter, thinner */
+  background: linear-gradient(to bottom, rgba(0,0,0,0.55), rgba(0,0,0,0));
+}
+#vignette::after {
+  bottom: 0;
+  height: 72vh; /* bottom: thicker */
+  background: linear-gradient(to top, rgba(0,0,0,1) 15%, rgba(0,0,0,0) 35%);
+}
+
+/* Fade vignette when dialog/UI is hidden by effects or no current view */
+body[data-ui-delay="1"] #vignette { opacity: 0; }
+#current[hidden] ~ #vignette { opacity: 0; }
+
+@media (max-width: 920px) {
+  .character-slot { bottom: 100px; }
+  .character-slot img { max-height: 64vh; }
+  .character-slot--left { left: 32%; }
+  .character-slot--right { left: 68%; }
+}
+@media (max-width: 600px) {
+  .character-slot { bottom: 90px; }
+  .character-slot img { max-height: 58vh; }
+  .character-slot--left { left: 30%; }
+  .character-slot--right { left: 70%; }
+}
+

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Story Reader</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="sprite-assets.css" id="spriteCss">
+  <script>
+    // Ensure assets base is available before any module initializes
+    window.DATA_ASSETS = 'https://raw.githubusercontent.com/akgcc/arkdata/main/assets/';
+  </script>
+  <script defer src="story_background.js"></script>
+  <script defer src="story_audio.js"></script>
+  <script defer src="story_characters.js"></script>
+  <script defer src="story_camera.js"></script>
+  <script defer src="story_effects.js"></script>
+  <script defer src="app.js"></script>
+  <script>
+    // Lightweight live-reload for sprite-assets.css without page refresh
+    (function(){
+      var CSS_PATH = 'sprite-assets.css';
+      var link = document.getElementById('spriteCss');
+      if(!link) return;
+      var lastTag = null;
+      var lastLen = null;
+      async function check(){
+        try{
+          // Prefer HEAD for Last-Modified / ETag
+          var res = await fetch(CSS_PATH, { method: 'HEAD', cache: 'no-store' });
+          if(res && res.ok){
+            var tag = res.headers.get('ETag') || res.headers.get('Last-Modified');
+            if(tag && lastTag && tag !== lastTag){
+              link.href = CSS_PATH + '?v=' + Date.now();
+            }
+            if(tag) lastTag = tag;
+            return;
+          }
+        } catch(_){}
+        // Fallback: GET and compare length (cache-busted)
+        try{
+          var res2 = await fetch(CSS_PATH + '?rand=' + Date.now(), { cache: 'no-store' });
+          if(res2 && res2.ok){
+            var txt = await res2.text();
+            var len = txt.length;
+            if(lastLen != null && len !== lastLen){ link.href = CSS_PATH + '?v=' + Date.now(); }
+            lastLen = len;
+          }
+        } catch(_){}
+      }
+      setInterval(check, 1000); // check every second
+    })();
+  </script>
+  <noscript>This page requires JavaScript to function.</noscript>
+</head>
+<body>
+  <header>
+    <label>
+      Category:
+      <select id="categorySelect"></select>
+    </label>
+    <label>
+      Chapter:
+      <select id="chapterSelect"></select>
+    </label>
+    <label>
+      Level:
+      <select id="levelSelect"></select>
+    </label>
+    <span id="status" class="muted"></span>
+  </header>
+
+  <section id="current" hidden>
+    <div class="name" id="currentName"></div>
+    <div class="dialog"><div class="text" id="currentText"></div></div>
+    <div id="choices" class="choices"></div>
+  </section>
+
+  <!-- Vignette overlay (top/bottom shadows). Stays above images, below dialog/blocker. -->
+  <div id="vignette" aria-hidden="true"></div>
+
+  <div id="controls">
+    <button id="prevBtn">Previous</button>
+    <button id="logBtn">Log</button>
+    <button id="nextBtn">Next</button>
+    <span class="muted" id="progress"></span>
+  </div>
+
+  <section id="list"></section>
+
+  <div id="logModal" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <strong id="logTitle">History Log</strong>
+        <button class="close-btn" id="closeLogBtn" aria-label="Close">?</button>
+      </div>
+      <div class="modal-body">
+        <div id="logContainer"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+
+
+
+
+
