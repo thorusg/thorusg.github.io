@@ -1,7 +1,5 @@
-  // Base path to local data (no example deps)
+  // Base server default (used when no hash specified)
   const SERVER_STRING = 'en_US';
-  // Base to story data (JSON + txt). Replace this with a raw GitHub URL if desired.
-  const DATA_BASE = `/content/Kengxxiao/${SERVER_STRING}`;
   // Base to static assets (images, audio, etc.). Replace this to point to a CDN/raw URL when needed.
   const DATA_ASSETS = `https://raw.githubusercontent.com/akgcc/arkdata/main/assets/`;
   // Expose assets base for other modules loaded on the page, but don't overwrite if set early in index.html
@@ -11,6 +9,22 @@
   const DEFAULT_ROUTE_HASH = '#chapter=main_0&level=obt%2Fguide%2Fbeg%2F0_welcome_to_guide';
 
 (function(){
+  const SERVER_NAMES = {
+    en_US: 'EN (en_US)',
+    ja_JP: 'JP (ja_JP)',
+    ko_KR: 'KR (ko_KR)',
+    zh_CN: 'CN (zh_CN)',
+    ru_RU: 'RU (ru_RU)'
+  };
+
+  let currentServer = SERVER_STRING;
+  function getDataBase(){
+    if(currentServer === 'zh_CN'){
+      return `https://raw.githubusercontent.com/Kengxxiao/ArknightsGameData/master/${currentServer}`;
+    }
+    return `https://raw.githubusercontent.com/thorusg/ArknightsGameData_YoStar/main/${currentServer}`;
+  }
+  const serverSelect = document.getElementById('serverSelect');
   const categorySelect = document.getElementById('categorySelect');
   const chapterSelect = document.getElementById('chapterSelect');
   const levelSelect = document.getElementById('levelSelect');
@@ -28,6 +42,26 @@
   const logContainer = document.getElementById('logContainer');
   const closeLogBtn = document.getElementById('closeLogBtn');
   const controlsEl = document.getElementById('controls');
+  const speedSlider = document.getElementById('speedSlider');
+  const speedValueEl = document.getElementById('speedValue');
+  const headerEl = document.getElementById('appHeader') || document.querySelector('header');
+  const headerToggleBtn = document.getElementById('headerToggle');
+  const playerNameInput = document.getElementById('playerName');
+
+  const isLocalEnvironment = (() => {
+    try{
+      const loc = window.location || {};
+      const protocol = (loc.protocol || '').toLowerCase();
+      const host = (loc.hostname || '').toLowerCase();
+      if(protocol === 'file:') return true;
+      if(!host) return true;
+      if(host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+      if(/\.local$/.test(host)) return true;
+    }catch{}
+    return false;
+  })();
+  const enableDebugLog = isLocalEnvironment;
+  const enableBacktrack = isLocalEnvironment;
 
   const backgroundAPI = window.StoryBackground || {};
   const backgroundController = backgroundAPI.BackgroundController
@@ -54,6 +88,12 @@
   const parseCharSlotTag = typeof characterAPI.parseCharSlotTag === 'function' ? characterAPI.parseCharSlotTag : null;
   const parseDialogTag = typeof characterAPI.parseDialogTag === 'function' ? characterAPI.parseDialogTag : null;
 
+  const cameraAPI = window.StoryCamera || {};
+  const cameraController = cameraAPI.CameraShakeController
+    ? new cameraAPI.CameraShakeController()
+    : null;
+  const parseCameraShake = typeof cameraAPI.parseCameraShake === 'function' ? cameraAPI.parseCameraShake : null;
+
   // Camera effects/controllers
   // (moved to top of file) duplicate leftover removed
 
@@ -63,8 +103,9 @@
     : null;
   const parseCameraEffect = typeof effectsAPI.parseCameraEffect === 'function' ? effectsAPI.parseCameraEffect : null;
 
+  // Hash bootstrap: include server param when missing entirely
   if(!window.location.hash){
-    window.location.hash = DEFAULT_ROUTE_HASH.slice(1);
+    window.location.hash = `server=${encodeURIComponent(SERVER_STRING)}&` + DEFAULT_ROUTE_HASH.slice(1);
   }
 
   let storyReview = null; // story_review_table.json
@@ -94,6 +135,204 @@
   let lastRenderedViewIndex = -1;
   let pendingEffectTimers = [];
   let textRevealRafId = null;
+  const logEntryCache = new WeakMap();
+
+  // Player nickname handling
+  let playerNickname = null;
+  function readNickname(){
+    try{
+      const s = localStorage.getItem('playerNickname');
+      if(s!=null) return String(s);
+    }catch{}
+    return '';
+  }
+  function writeNickname(v){
+    try{ localStorage.setItem('playerNickname', String(v||'')); }catch{}
+  }
+  function getNickname(){
+    if(playerNickname == null || playerNickname === '') return '{@nickname}';
+    return playerNickname;
+  }
+  function applyVariables(str){
+    try{
+      let s = String(str == null ? '' : str);
+      // Replace {@nickname} with the chosen name
+      s = s.replace(/\{@nickname\}/gi, getNickname());
+      return s;
+    }catch{ return String(str||''); }
+  }
+
+  const CACHE_DEFAULT_MAX_AGE = 5 * 60 * 1000; // 5 minutes
+  const DEFAULT_LEVEL_CACHE_MS = 30 * 60 * 1000; // 30 minutes
+  const requestCache = new Map();
+  const inflightRequests = new Map();
+  const isCacheDisabled = !!window.DISABLE_DATA_CACHE;
+  const LEVEL_CACHE_MAX_AGE = (() => {
+    const override = Number(window.LEVEL_CACHE_MAX_AGE);
+    if(Number.isFinite(override) && override >= 0){
+      return override;
+    }
+    return DEFAULT_LEVEL_CACHE_MS;
+  })();
+
+  function buildCacheKey(url, parser, explicitKey){
+    if(explicitKey) return explicitKey;
+    const type = typeof parser === 'string' ? parser : (typeof parser === 'function' ? 'fn' : 'text');
+    return `${type}:${url}`;
+  }
+
+  async function parseResponse(res, parser){
+    if(typeof parser === 'function'){
+      return parser(res);
+    }
+    const mode = (parser || 'json').toLowerCase();
+    if(mode === 'json'){
+      return res.json();
+    }
+    if(mode === 'text'){
+      return res.text();
+    }
+    if(mode === 'blob'){
+      return res.blob();
+    }
+    if(mode === 'arraybuffer'){
+      return res.arrayBuffer();
+    }
+    return res.text();
+  }
+
+  function getCachedValue(key, maxAgeMs){
+    if(!requestCache.has(key)) return null;
+    const entry = requestCache.get(key);
+    if(!entry) return null;
+    if(maxAgeMs === 0) return null;
+    const age = Date.now() - entry.timestamp;
+    if(maxAgeMs === Infinity || age <= maxAgeMs){
+      return entry.value;
+    }
+    requestCache.delete(key);
+    return null;
+  }
+
+  function clearDataCaches(){
+    requestCache.clear();
+    inflightRequests.clear();
+  }
+
+  async function fetchCached(url, options = {}){
+    const {
+      parser = 'json',
+      maxAgeMs = CACHE_DEFAULT_MAX_AGE,
+      cacheKey: explicitKey,
+      fetchOptions = {}
+    } = options;
+    const key = buildCacheKey(url, parser, explicitKey);
+    if(!isCacheDisabled){
+      const cached = getCachedValue(key, maxAgeMs);
+      if(cached != null){
+        return cached;
+      }
+      if(inflightRequests.has(key)){
+        return inflightRequests.get(key);
+      }
+    }
+    const promise = (async () => {
+      const mergedOptions = Object.assign(
+        { cache: maxAgeMs === 0 ? 'reload' : 'default' },
+        fetchOptions || {}
+      );
+      const res = await fetch(url, mergedOptions);
+      if(!res.ok){
+        throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
+      }
+      const value = await parseResponse(res, parser);
+      if(!isCacheDisabled && maxAgeMs !== 0){
+        requestCache.set(key, { value, timestamp: Date.now() });
+      }
+      return value;
+    })().catch((err) => {
+      if(!isCacheDisabled){
+        requestCache.delete(key);
+      }
+      throw err;
+    }).finally(() => {
+      if(!isCacheDisabled){
+        inflightRequests.delete(key);
+      }
+    });
+    if(!isCacheDisabled){
+      inflightRequests.set(key, promise);
+    }
+    return promise;
+  }
+
+  function collectEffectTargets(){
+    const targets = [];
+    try{
+      if(backgroundController){
+        const names = ['bgLayer', 'bgTweenLayer', 'imageLayer', 'imageLayer2', 'tweenLayer', 'curtainLayer', 'blockerLayer'];
+        for(const name of names){
+          const node = backgroundController[name];
+          if(node) targets.push(node);
+        }
+      }
+      if(characterController && characterController.layer){
+        targets.push(characterController.layer);
+      }
+    }catch{}
+    return targets;
+  }
+
+  function hardResetControllers(){
+    clearPendingEffects();
+    if(backgroundController && typeof backgroundController.reset === 'function'){ backgroundController.reset(); }
+    if(audioController && typeof audioController.reset === 'function'){ audioController.reset(); }
+    if(characterController && typeof characterController.reset === 'function'){ characterController.reset(); }
+    try{
+      const targets = collectEffectTargets();
+      if(cameraController && typeof cameraController.reset === 'function'){ cameraController.reset(targets); }
+      if(effectsController && typeof effectsController.reset === 'function'){ effectsController.reset(targets); }
+    }catch{}
+  }
+
+  function runEffectOperation(op){
+    if(!op) return;
+    try{
+      if(op.type === 'blocker' && backgroundController && typeof backgroundController.applyBlocker === 'function'){
+        backgroundController.applyBlocker(op.entry);
+      } else if(op.type === 'image' && backgroundController && typeof backgroundController.apply === 'function'){
+        backgroundController.apply(op.entry);
+        try{
+          if(characterController && typeof characterController.applyFor === 'function'){
+            characterController.applyFor(dialogues, selections, op.entry);
+          }
+        }catch{}
+      } else if(op.type === 'curtain' && backgroundController && typeof backgroundController.applyCurtain === 'function'){
+        backgroundController.applyCurtain(op.entry);
+      } else if(op.type === 'audio' && audioController && typeof audioController.apply === 'function'){
+        audioController.apply(op.entry);
+      } else if(op.type === 'sound' && audioController && typeof audioController.playSound === 'function'){
+        audioController.playSound(op.entry);
+      } else if(op.type === 'character' && characterController && typeof characterController.applyFor === 'function'){
+        characterController.applyFor(dialogues, selections, op.entry);
+      } else if(op.type === 'camerashake' && cameraController){
+        const targets = collectEffectTargets();
+        cameraController.shake(op.entry, targets);
+      } else if(op.type === 'cameraeffect' && effectsController && typeof effectsController.apply === 'function'){
+        const targets = collectEffectTargets();
+        effectsController.apply(op.entry, targets);
+      }
+    }catch{}
+  }
+
+  function scheduleEffectOperation(op, delayMs){
+    if(delayMs > 0){
+      const id = setTimeout(()=>{ runEffectOperation(op); }, delayMs);
+      pendingEffectTimers.push(id);
+    } else {
+      runEffectOperation(op);
+    }
+  }
   // Responsive scaling: match background's contain scale for a 16:9 canvas
   function updateViewportScale(){
     try{
@@ -108,6 +347,34 @@
 
   function cancelTextReveal(){
     if(textRevealRafId){ try{ cancelAnimationFrame(textRevealRafId); }catch{} textRevealRafId = null; }
+  }
+
+  // Text speed controls
+  function clamp01(n){ return Math.max(0, Math.min(1, Number(n)||0)); }
+  function cpsFromSlider(val){
+    const v = Math.max(0, Math.min(100, Math.floor(Number(val)||0)));
+    if(v >= 100) return Infinity; // instant
+    // Map 0..99 -> 2..120 cps (linear)
+    return 2 + (v/99) * 118;
+  }
+  function defaultSliderForCps(cps){
+    const c = Math.max(2, Math.min(120, Number(cps)||28));
+    const v = Math.round(((c - 2) / 118) * 99);
+    return Math.max(0, Math.min(99, v));
+  }
+  function readSpeed(){
+    try{ const s = localStorage.getItem('textSpeed'); if(s!=null) return Math.max(0, Math.min(100, parseInt(s))); }catch{}
+    return defaultSliderForCps(28);
+  }
+  function writeSpeed(v){
+    try{ localStorage.setItem('textSpeed', String(Math.max(0, Math.min(100, Math.floor(v||0))))); }catch{}
+  }
+  function updateSpeedLabel(){
+    if(!speedValueEl) return;
+    const v = speedSlider ? Number(speedSlider.value)||0 : readSpeed();
+    if(v >= 100){ speedValueEl.textContent = 'Instant'; return; }
+    const cps = Math.round(cpsFromSlider(v));
+    speedValueEl.textContent = `${cps} cps`;
   }
 
   function wrapCharsForReveal(root){
@@ -173,8 +440,10 @@
     }
     return out;
   }
-  function setHashRoute(chapterId, levelTxt){
+  function setHashRoute(chapterId, levelTxt, server){
     const parts = [];
+    const srv = server || parseHash().server || currentServer || SERVER_STRING;
+    if(srv) parts.push(`server=${encodeURIComponent(srv)}`);
     if(chapterId) parts.push(`chapter=${encodeURIComponent(chapterId)}`);
     if(levelTxt) parts.push(`level=${encodeURIComponent(levelTxt)}`);
     const newHash = '#' + parts.join('&');
@@ -186,35 +455,52 @@
     }
   }
 
+  function populateServers(preferred){
+    if(!serverSelect) return;
+    serverSelect.innerHTML = '';
+    for(const code of Object.keys(SERVER_NAMES)){
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = SERVER_NAMES[code];
+      serverSelect.appendChild(opt);
+    }
+    const want = preferred || parseHash().server || currentServer || SERVER_STRING;
+    currentServer = Object.prototype.hasOwnProperty.call(SERVER_NAMES, want) ? want : SERVER_STRING;
+    serverSelect.value = currentServer;
+  }
+
   async function loadStoryIndex(){
     setStatus('Loading story index...');
     try{
-      // Preload extra sources for future categories (Module, Integrated Strategies)
-      try {
-        const modRes = await fetch(`${DATA_BASE}/gamedata/excel/uniequip_table.json`, { cache: 'no-store' });
-        if(modRes.ok){ moduleData = await modRes.json(); }
-      } catch {}
-      try {
-        const rogRes = await fetch(`${DATA_BASE}/gamedata/excel/roguelike_topic_table.json`, { cache: 'no-store' });
-        if(rogRes.ok){ rogueData = await rogRes.json(); }
-      } catch {}
-
-      const url = `${DATA_BASE}/gamedata/excel/story_review_table.json`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if(!res.ok) throw new Error('Failed to load story_review_table');
-      storyReview = await res.json();
-      if(!storyVariables){
-        try {
-          const varRes = await fetch(`${DATA_BASE}/gamedata/story/story_variables.json`, { cache: 'no-store' });
-          if(varRes.ok){
-            storyVariables = await varRes.json();
-            if(audioController && typeof audioController.setVariables === 'function'){
-              audioController.setVariables(storyVariables);
-            }
-          }
-        } catch(err){
-          console.warn('Failed to load story variables', err);
-        }
+      const base = getDataBase();
+      const [
+        reviewData,
+        moduleMaybe,
+        rogueMaybe,
+        variablesMaybe
+      ] = await Promise.all([
+        fetchCached(`${base}/gamedata/excel/story_review_table.json`, { parser: 'json', maxAgeMs: 15 * 60 * 1000 }),
+        fetchCached(`${base}/gamedata/excel/uniequip_table.json`, { parser: 'json', maxAgeMs: 30 * 60 * 1000 }).catch(()=>null),
+        fetchCached(`${base}/gamedata/excel/roguelike_topic_table.json`, { parser: 'json', maxAgeMs: 30 * 60 * 1000 }).catch(()=>null),
+        storyVariables
+          ? Promise.resolve(null)
+          : fetchCached(`${base}/gamedata/story/story_variables.json`, { parser: 'json', maxAgeMs: 30 * 60 * 1000 })
+              .then((vars) => {
+                if(audioController && typeof audioController.setVariables === 'function'){
+                  audioController.setVariables(vars);
+                }
+                return vars;
+              })
+              .catch((err) => {
+                console.warn('Failed to load story variables', err);
+                return null;
+              })
+      ]);
+      storyReview = reviewData;
+      if(moduleMaybe) moduleData = moduleMaybe;
+      if(rogueMaybe) rogueData = rogueMaybe;
+      if(!storyVariables && variablesMaybe){
+        storyVariables = variablesMaybe;
       }
       buildChapters();
       await buildRogueChapters();
@@ -404,31 +690,10 @@
     const myToken = ++currentLoadToken;
     setStatus('Loading level...');
     // Hard reset any in-flight scheduled ops first
-    clearPendingEffects();
-    if(backgroundController){ backgroundController.reset(); }
-    if(audioController){ audioController.reset(); }
-    if(characterController){ characterController.reset(); }
-    // Also reset camera shake and grayscale effects immediately
+    hardResetControllers();
     try{
-      const els = [];
-      if(backgroundController){
-        if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-        if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-        if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-        if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-        if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-        if(backgroundController.curtainLayer) els.push(backgroundController.curtainLayer);
-        if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-      }
-      if(characterController && characterController.layer){ els.push(characterController.layer); }
-      if(typeof cameraController?.reset === 'function'){ cameraController.reset(els); }
-      if(typeof effectsController?.reset === 'function'){ effectsController.reset(els); }
-    }catch{}
-    try{
-      const url = `${DATA_BASE}/gamedata/story/${storyTxt}.txt`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if(!res.ok) throw new Error('Failed to load level file');
-      const text = await res.text();
+      const url = `${getDataBase()}/gamedata/story/${storyTxt}.txt`;
+      const text = await fetchCached(url, { parser: 'text', maxAgeMs: LEVEL_CACHE_MAX_AGE });
       // If a newer load started while we awaited, ignore this result
       if(myToken !== currentLoadToken) return;
       selections = {};
@@ -444,24 +709,7 @@
       console.error(err);
       if(myToken === currentLoadToken) setStatus('Failed to load level');
       renderDialogues([]);
-      if(backgroundController){ backgroundController.reset(); }
-      if(audioController){ audioController.reset(); }
-      if(characterController){ characterController.reset(); }
-      try{
-        const els = [];
-        if(backgroundController){
-          if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-          if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-          if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-          if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-          if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-          if(backgroundController.curtainLayer) els.push(backgroundController.curtainLayer);
-          if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-        }
-        if(characterController && characterController.layer){ els.push(characterController.layer); }
-        if(typeof cameraController?.reset === 'function'){ cameraController.reset(els); }
-        if(typeof effectsController?.reset === 'function'){ effectsController.reset(els); }
-      }catch{}
+      hardResetControllers();
     }
   }
 
@@ -491,10 +739,12 @@
     return out;
   }
 
-  // Helper: detect CJK characters (used to suppress non-English title lines)
+  // Helper: detect CJK characters
   function containsCJK(str){
     return /[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(str);
   }
+  // Only filter CJK lines when reading EN server files.
+  function shouldFilterCJK(){ return currentServer === 'en_US'; }
 
   // Render limited inline markup (<i>, <b>) safely
   function escapeHTML(str){
@@ -528,7 +778,8 @@
     return null;
   }
   function renderRichText(el, text){
-    const norm = normalizeTextForDisplay(text);
+    const withVars = applyVariables(text);
+    const norm = normalizeTextForDisplay(withVars);
     const esc = escapeHTML(norm);
     // Allow only a safe subset of tags
     const html = esc
@@ -553,6 +804,7 @@
     const subtitleRe = /^\[subtitle\((.*)\)\]/i;
     const namedTagRe = /^\[[a-z]+\(([^)]*)\)\](.*)$/i;
     const textInTagRe = /^\[(subtitle|sticker)\(([^)]*)\)\]/i;
+    const headerRe = /^\[header\b/i; // e.g., [HEADER(...)] Title
     const decisionRe = /^\[decision\b/i;
     const predicateRe = /^\[predicate\b/i;
     const delayRe = /^\[delay\b/i;
@@ -566,6 +818,9 @@
     let activeGuard = null; // { decisionId, allow: [] }
     for(const rawLine of lines){
       const raw = (rawLine || '').replace(/\uFEFF/g, '');
+      if(headerRe.test(raw)){
+        continue;
+      }
       // Decision nodes
       if(decisionRe.test(raw)){
         const params = extractParams(raw);
@@ -684,7 +939,7 @@
       if(m){
         const name = (m[1]||'').trim();
         const body = (m[2]||'').trim();
-        if(body.length && !containsCJK(body)){
+        if(body.length && (!shouldFilterCJK() || !containsCJK(body))){
           out.push({ type: 'line', name, text: body, guard: activeGuard ? { decisionId: activeGuard.decisionId, allow: [...activeGuard.allow] } : null });
         }
         continue;
@@ -696,7 +951,7 @@
         const tm = params.match(/\btext\s*=\s*"([^"]*)"/i);
         if(tm && tm[1]){
           const body = tm[1].trim();
-          if(body.length && !containsCJK(body)){
+          if(body.length && (!shouldFilterCJK() || !containsCJK(body))){
             out.push({ type: 'line', name: '', text: body, guard: activeGuard ? { decisionId: activeGuard.decisionId, allow: [...activeGuard.allow] } : null });
           }
         }
@@ -709,7 +964,7 @@
         const tm2 = params.match(/\btext\s*=\s*"([^"]*)"/i);
         if(tm2 && tm2[1]){
           const body = tm2[1].trim();
-          if(body.length && !containsCJK(body)){
+          if(body.length && (!shouldFilterCJK() || !containsCJK(body))){
             out.push({ type: 'line', name: '', text: body, guard: activeGuard ? { decisionId: activeGuard.decisionId, allow: [...activeGuard.allow] } : null });
           }
         }
@@ -721,7 +976,7 @@
         const params = m[1] || '';
         const body = (m[2]||'').trim();
         const nm = (params.match(/\bname\s*=\s*"([^"]*)"/i) || [,''])[1].trim();
-        if(body.length && !containsCJK(body)){
+        if(body.length && (!shouldFilterCJK() || !containsCJK(body))){
           out.push({ type: 'line', name: nm, text: body, guard: activeGuard ? { decisionId: activeGuard.decisionId, allow: [...activeGuard.allow] } : null });
         }
         continue;
@@ -729,7 +984,7 @@
       // Bare narration lines (non-empty and not a control tag)
       if(raw.trim().length && raw.trim()[0] !== '['){
         const body = raw.trim();
-        if(!containsCJK(body)){
+        if(!shouldFilterCJK() || !containsCJK(body)){
           out.push({ type: 'line', name: '', text: body, guard: activeGuard ? { decisionId: activeGuard.decisionId, allow: [...activeGuard.allow] } : null });
         }
         continue;
@@ -755,15 +1010,70 @@
     const startPos = prevVisibleItem && dialogues ? dialogues.indexOf(prevVisibleItem) : -1;
     if(endPos < 0) return plan;
     let t = 0;
+    let lastPlainImage = null; // last [Image] (not ImageTween) in this window
+    let lastPlainBackground = null; // last [Background] (not BackgroundTween) in this window
     for(let i = startPos + 1; i <= endPos; i++){
       const it = dialogues[i];
       if(!it) continue;
       if(it.guard && !isGuardSatisfied(it.guard, selections)) continue;
-      // Do not schedule per-[Character]/[charslot] ops here.
-      // Character state is resolved and applied once when rendering the next visible item
-      // so multiple consecutive [charslot] directives appear together.
+      // Schedule character-layer updates exactly when they appear in the timeline,
+      // so character swaps take effect during blockers/delays between visible lines.
       if(it.type === 'character' || it.type === 'charslot'){
-        // Skip scheduling; handled by renderCurrentCore via characterController.applyFor
+        // Determine if this entry is a clear (empty [charslot] or [Character] without names)
+        const isClearCharslot = (it.type === 'charslot') && !it.slot && !it.name && !it.hasDirective;
+        const isClearCharacter = (it.type === 'character') && !!it.clear;
+        const isClear = isClearCharslot || isClearCharacter;
+
+        if(isClear){
+          // Always keep explicit clears; do not coalesce them away.
+          // If a clear shares the exact same timestamp as another character op,
+          // nudge it by a tiny epsilon so prior shows can paint before fading out.
+          let atT = t;
+          for(let k = plan.ops.length - 1; k >= 0; k--){
+            const op = plan.ops[k];
+            if(!op) continue;
+            if(op.atMs < t) break;
+            // Use a slightly larger epsilon to ensure a visible paint even when images swap in async
+            if(op.type === 'character' && op.atMs === t){ atT = t + 100; break; }
+          }
+          plan.ops.push({ atMs: atT, type: 'character', entry: it });
+          continue;
+        }
+
+        // For non-clear character/slot updates at the same timestamp, replace the last
+        // non-clear character op while preserving any earlier clear ops at that time.
+        let replaced = false;
+        for(let k = plan.ops.length - 1; k >= 0; k--){
+          const op = plan.ops[k];
+          if(!op) continue;
+          if(op.atMs < t) break; // earlier time; stop scanning
+          if(op.type === 'character'){
+            const opEntry = op.entry || {};
+            const opIsClear = ((opEntry.type === 'charslot') && !opEntry.slot && !opEntry.name && !opEntry.hasDirective)
+              || ((opEntry.type === 'character') && !!opEntry.clear);
+            if(!opIsClear && op.atMs === t){
+              plan.ops[k] = { atMs: t, type: 'character', entry: it };
+              replaced = true;
+              break;
+            }
+          }
+        }
+        if(!replaced){
+          plan.ops.push({ atMs: t, type: 'character', entry: it });
+        }
+        // Character ops do not affect overall wait/hide timing by default.
+        // If a [charslot] explicitly requests blocking via isblock=true, gate for its duration.
+        if(it.type === 'charslot' && (it.isBlock === true)){
+          const secs = Number(it.duration || it.fadeTime || 0) || 0;
+          if(secs > 0){
+            const ms = Math.round(secs * 1000);
+            plan.totalMs += ms;
+            plan.hideMs += ms;
+            plan.blockRender = true;
+            plan.shouldHideUI = true;
+            t += ms;
+          }
+        }
         continue;
       }
       if(it.type === 'sound'){
@@ -791,6 +1101,33 @@
       if(it.type === 'audio'){
         plan.ops.push({ atMs: t, type: 'audio', entry: it });
       } else if(it.type === 'image'){
+        // If this is an ImageTween, attach explicit params from the immediately preceding Image only.
+        try{
+          const tag = (it.tag || '').toLowerCase();
+          if(tag === 'image'){
+            lastPlainImage = it;
+          } else if(tag === 'background'){
+            lastPlainBackground = it;
+          } else if(tag === 'imagetween'){
+            const p = lastPlainImage || null;
+            const toNum = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+            it._baseParams = p ? {
+              x: toNum(p.x),
+              y: toNum(p.y),
+              xScale: toNum(p.xScale),
+              yScale: toNum(p.yScale),
+            } : null;
+          } else if(tag === 'backgroundtween'){
+            const p = lastPlainBackground || null;
+            const toNum = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+            it._baseParams = p ? {
+              x: toNum(p.x),
+              y: toNum(p.y),
+              xScale: toNum(p.xScale),
+              yScale: toNum(p.yScale),
+            } : null;
+          }
+        }catch{}
         plan.ops.push({ atMs: t, type: 'image', entry: it });
         const ft = Number(it.fadeTime||0) || 0;
         if(ft > 0){
@@ -911,12 +1248,13 @@
     const textInTagRe = /^\[(subtitle|sticker)\(([^\)]*)\)\]/i; // [Sticker(..., text="...")]
     for(const rawLine of lines){
       const raw = rawLine || '';
+      if(/^\[header\b/i.test(raw)) { continue; }
       // Named or empty-name dialogue lines
       const m = re.exec(raw);
       if(m){
         const name = (m[1]||'').trim();
         const body = (m[2]||'').trim();
-        if(body.length && !containsCJK(body)){ out.push({ name, text: body }); }
+        if(body.length && (!shouldFilterCJK() || !containsCJK(body))){ out.push({ name, text: body }); }
         continue;
       }
       // Subtitle blocks with explicit text param
@@ -926,7 +1264,7 @@
         const tm = params.match(/text\s*=\s*\"([^\"]*)\"/i);
         if(tm && tm[1]){
           const body = tm[1].trim();
-          if(body.length && !containsCJK(body)){ out.push({ name: '', text: body }); }
+          if(body.length && (!shouldFilterCJK() || !containsCJK(body))){ out.push({ name: '', text: body }); }
         }
         continue;
       }
@@ -937,7 +1275,7 @@
         const tm2 = params.match(/\btext\s*=\s*\"([^\"]*)\"/i);
         if(tm2 && tm2[1]){
           const body = tm2[1].trim();
-          if(body.length && !containsCJK(body)){ out.push({ name: '', text: body }); }
+          if(body.length && (!shouldFilterCJK() || !containsCJK(body))){ out.push({ name: '', text: body }); }
         }
         continue;
       }
@@ -947,13 +1285,13 @@
         const params = nt[1] || '';
         const body = (nt[2]||'').trim();
         const nm = (params.match(/\bname\s*=\s*\"([^\"]*)\"/i) || [,''])[1].trim();
-        if(body.length && !containsCJK(body)){ out.push({ name: nm, text: body }); }
+        if(body.length && (!shouldFilterCJK() || !containsCJK(body))){ out.push({ name: nm, text: body }); }
         continue;
       }
       // Bare narration lines (non-empty and not a control tag)
       if(raw.trim().length && raw.trim()[0] !== '['){
         const body = raw.trim();
-        if(!containsCJK(body)){
+        if(!shouldFilterCJK() || !containsCJK(body)){
           out.push({ name: '', text: body });
         }
         continue;
@@ -963,6 +1301,131 @@
     return out;
   }
 
+  function populateLogEntry(el, item, opts = {}){
+    if(!el || !item) return null;
+    const doc = el.ownerDocument || document;
+    const { includeIndex = false, index = -1 } = opts;
+    el.textContent = '';
+    let className = 'line';
+    if(item.type==='decision'){
+      className += ' decision';
+    } else if(item.type==='image'){
+      className += ' image-change';
+    } else if(item.type==='audio'){
+      className += ' audio-change';
+    }
+    el.className = className;
+    if(includeIndex && index >= 0){
+      el.dataset.idx = String(index);
+    } else if(el.dataset && el.dataset.idx != null){
+      delete el.dataset.idx;
+    }
+    if(item.type==='image'){
+      const text = doc.createElement('span');
+      text.className = 'text muted';
+      const kind = item.tag === 'background' ? 'Background' : 'Image';
+      let label = item.image ? `${kind} -> ${item.image}` : `${kind} cleared`;
+      if(item.tiled){ label += ' (tiled)'; }
+      if(Number.isFinite(item.width) || Number.isFinite(item.height)){
+        const w = Number.isFinite(item.width) ? item.width : '?';
+        const h = Number.isFinite(item.height) ? item.height : '?';
+        label += ` [${w}x${h}]`;
+      }
+      text.textContent = label;
+      el.appendChild(text);
+      return el;
+    }
+    if(item.type==='blocker'){
+      const text = doc.createElement('span');
+      text.className = 'text muted';
+      const f = item.from || {}; const t = item.to || {};
+      const fade = Number(item.fadeTime) || 0;
+      let label = `Blocker ${f.r||0},${f.g||0},${f.b||0},${f.a||0} -> ${t.r||255},${t.g||255},${t.b||255},${t.a||1}`;
+      if(fade>0){ label += ` (fade ${fade}s)`; }
+      text.textContent = label;
+      el.appendChild(text);
+      return el;
+    }
+    if(item.type==='audio'){
+      const text = doc.createElement('span');
+      text.className = 'text muted';
+      let label;
+      if(item.action === 'stop'){
+        label = 'Music stop';
+        if(Number.isFinite(item.fadeTime) && item.fadeTime > 0){
+          label += ` (fade ${item.fadeTime}s)`;
+        }
+      } else {
+        const parts = [];
+        if(item.intro){ parts.push(`intro ${item.intro}`); }
+        if(item.key){ parts.push(`loop ${item.key}`); }
+        label = 'Music -> ' + (parts.length ? parts.join(', ') : 'unknown');
+        if(Number.isFinite(item.volume)){ label += ` [vol ${item.volume}]`; }
+        if(Number.isFinite(item.delay) && item.delay > 0){ label += ` [delay ${item.delay}s]`; }
+        if(Number.isFinite(item.crossfade) && item.crossfade > 0){ label += ` [fade-in ${item.crossfade}s]`; }
+      }
+      text.textContent = label;
+      el.appendChild(text);
+      return el;
+    }
+    if(item.type==='charslot'){
+      const text = doc.createElement('span');
+      text.className = 'text muted';
+      const slotMap = { left: 'Left', right: 'Right', center: 'Center', l: 'Left', r: 'Right', m: 'Center' };
+      let label = '';
+      const hasTarget = !!(item.slot || item.name);
+      if(!hasTarget){
+        label = 'Sprites cleared';
+        const dur = (Number(item.duration) || Number(item.fadeTime));
+        if(Number.isFinite(dur) && dur > 0){ label += ` (fade ${dur}s)`; }
+      } else {
+        const side = slotMap[item.slot] || (item.slot || '');
+        label = `Sprite -> ${side || '?'}: ${item.name || ''}`.trim();
+        const parts = [];
+        const dur = (Number(item.duration) || Number(item.fadeTime));
+        if(Number.isFinite(dur) && dur > 0){ parts.push(`fade ${dur}s`); }
+        if(item.focus){ parts.push(`focus=${item.focus}`); }
+        if(parts.length){ label += ' [' + parts.join(', ') + ']'; }
+      }
+      text.textContent = label;
+      el.appendChild(text);
+      return el;
+    }
+    if(item.type==='character'){
+      const text = doc.createElement('span');
+      text.className = 'text muted';
+      const parts = [];
+      if(item.name){ parts.push(`Left: ${item.name}`); }
+      if(item.name3){ parts.push(`Center: ${item.name3}`); }
+      if(item.name2){ parts.push(`Right: ${item.name2}`); }
+      if(!parts.length){ parts.push('Characters cleared'); }
+      if(Number.isFinite(item.focus)){ parts.push(`focus=${item.focus}`); }
+      text.textContent = parts.join(' | ');
+      el.appendChild(text);
+      return el;
+    }
+    if(item.type==='line' && item.name){
+      const name = doc.createElement('span');
+      name.className = 'name';
+      name.textContent = applyVariables(item.name) + ':';
+      el.appendChild(name);
+    }
+    if(item.type==='line'){
+      const text = doc.createElement('span');
+      text.className = 'text';
+      renderRichText(text, item.text);
+      el.appendChild(text);
+    } else if(item.type==='decision'){
+      const text = doc.createElement('span');
+      const labels = (item.options||[]).map(o=>applyVariables(o.label)).join(' / ');
+      const chosen = selections[item.id];
+      const chosenOpt = item.options.find(o=>o.value===chosen) || null;
+      const chosenLabel = chosenOpt ? applyVariables(chosenOpt.label) : chosen;
+      text.textContent = 'Choices: ' + labels + (chosen? ` (selected: ${chosenLabel||''})` : '');
+      el.appendChild(text);
+    }
+    return el;
+  }
   function buildLogFragment(list, opts = {}){
     const { includeIndex = false } = opts;
     const frag = document.createDocumentFragment();
@@ -976,132 +1439,40 @@
       const item = list[i];
       if(!item) continue;
       const div = document.createElement('div');
-      let className = 'line';
-      if(item.type==='decision'){
-        className += ' decision';
-      } else if(item.type==='image'){
-        className += ' image-change';
-      } else if(item.type==='audio'){
-        className += ' audio-change';
-      }
-      div.className = className;
-      if(includeIndex){ div.dataset.idx = String(i); }
-      if(item.type==='image'){
-        const text = document.createElement('span');
-        text.className = 'text muted';
-        const kind = item.tag === 'background' ? 'Background' : 'Image';
-        let label = item.image ? `${kind} -> ${item.image}` : `${kind} cleared`;
-        if(item.tiled){ label += ' (tiled)'; }
-        if(Number.isFinite(item.width) || Number.isFinite(item.height)){
-          const w = Number.isFinite(item.width) ? item.width : '?';
-          const h = Number.isFinite(item.height) ? item.height : '?';
-          label += ` [${w}x${h}]`;
-        }
-        text.textContent = label;
-        div.appendChild(text);
-        frag.appendChild(div);
-        continue;
-      }
-      if(item.type==='blocker'){
-        const text = document.createElement('span');
-        text.className = 'text muted';
-        const f = item.from || {}; const t = item.to || {};
-        const fade = Number(item.fadeTime) || 0;
-        let label = `Blocker ${f.r||0},${f.g||0},${f.b||0},${f.a||0} -> ${t.r||255},${t.g||255},${t.b||255},${t.a||1}`;
-        if(fade>0){ label += ` (fade ${fade}s)`; }
-        text.textContent = label;
-        div.appendChild(text);
-        frag.appendChild(div);
-        continue;
-      }
-      if(item.type==='audio'){
-        const text = document.createElement('span');
-        text.className = 'text muted';
-        let label;
-        if(item.action === 'stop'){
-          label = 'Music stop';
-          if(Number.isFinite(item.fadeTime) && item.fadeTime > 0){
-            label += ` (fade ${item.fadeTime}s)`;
-          }
-        } else {
-          const parts = [];
-          if(item.intro){ parts.push(`intro ${item.intro}`); }
-          if(item.key){ parts.push(`loop ${item.key}`); }
-          label = 'Music -> ' + (parts.length ? parts.join(', ') : 'unknown');
-          if(Number.isFinite(item.volume)){ label += ` [vol ${item.volume}]`; }
-          if(Number.isFinite(item.delay) && item.delay > 0){ label += ` [delay ${item.delay}s]`; }
-          if(Number.isFinite(item.crossfade) && item.crossfade > 0){ label += ` [fade-in ${item.crossfade}s]`; }
-        }
-        text.textContent = label;
-        div.appendChild(text);
-        frag.appendChild(div);
-        continue;
-      }
-      if(item.type==='charslot'){
-        const text = document.createElement('span');
-        text.className = 'text muted';
-        const slotMap = { left: 'Left', right: 'Right', center: 'Center', l: 'Left', r: 'Right', m: 'Center' };
-        let label = '';
-        const hasTarget = !!(item.slot || item.name);
-        if(!hasTarget){
-          label = 'Sprites cleared';
-          const dur = (Number(item.duration) || Number(item.fadeTime));
-          if(Number.isFinite(dur) && dur > 0){ label += ` (fade ${dur}s)`; }
-        } else {
-          const side = slotMap[item.slot] || (item.slot || '');
-          label = `Sprite -> ${side || '?'}: ${item.name || ''}`.trim();
-          const parts = [];
-          const dur = (Number(item.duration) || Number(item.fadeTime));
-          if(Number.isFinite(dur) && dur > 0){ parts.push(`fade ${dur}s`); }
-          if(item.focus){ parts.push(`focus=${item.focus}`); }
-          if(parts.length){ label += ' [' + parts.join(', ') + ']'; }
-        }
-        text.textContent = label;
-        div.appendChild(text);
-        frag.appendChild(div);
-        continue;
-      }
-      if(item.type==='character'){
-        const text = document.createElement('span');
-        text.className = 'text muted';
-        const parts = [];
-        if(item.name){ parts.push(`Left: ${item.name}`); }
-        if(item.name3){ parts.push(`Center: ${item.name3}`); }
-        if(item.name2){ parts.push(`Right: ${item.name2}`); }
-        if(!parts.length){ parts.push('Characters cleared'); }
-        if(Number.isFinite(item.focus)){ parts.push(`focus=${item.focus}`); }
-        text.textContent = parts.join(' | ');
-        div.appendChild(text);
-        frag.appendChild(div);
-        continue;
-      }
-      if(item.type==='line' && item.name){
-        const name = document.createElement('span');
-        name.className = 'name';
-        name.textContent = item.name + ':';
-        div.appendChild(name);
-      }
-      if(item.type==='line'){
-        const text = document.createElement('span');
-        text.className = 'text';
-        renderRichText(text, item.text);
-        div.appendChild(text);
-      } else if(item.type==='decision'){
-        const text = document.createElement('span');
-        const labels = (item.options||[]).map(o=>o.label).join(' / ');
-        const chosen = selections[item.id];
-        text.textContent = 'Choices: ' + labels + (chosen? ` (selected: ${(item.options.find(o=>o.value===chosen)||{}).label||chosen})` : '');
-        div.appendChild(text);
-      }
-      frag.appendChild(div);
+      const populated = populateLogEntry(div, item, { includeIndex, index: i });
+      if(populated) frag.appendChild(populated);
     }
     return frag;
   }
   function renderDialogues(list){
-    // Keep generating hidden list for potential debugging; not displayed inline
-    listEl.innerHTML = '';
-    listEl.appendChild(buildLogFragment(list));
-    currentEl.hidden = !list || !list.length;
+    const items = Array.isArray(list) ? list : [];
+    if(currentEl){ currentEl.hidden = !items.length; }
+    if(!enableDebugLog) return;
+    if(!listEl) return;
+    if(!items.length){
+      listEl.innerHTML = '';
+      listEl.appendChild(buildLogFragment(items));
+      return;
+    }
+    let pos = 0;
+    for(let i=0;i<items.length;i++){
+      const item = items[i];
+      if(!item) continue;
+      let node = logEntryCache.get(item);
+      if(!node){
+        node = document.createElement('div');
+        logEntryCache.set(item, node);
+      }
+      populateLogEntry(node, item);
+      const current = listEl.children[pos];
+      if(current !== node){
+        listEl.insertBefore(node, current || null);
+      }
+      pos++;
+    }
+    while(listEl.children.length > pos){
+      listEl.removeChild(listEl.lastElementChild);
+    }
   }
 
   function renderCurrentCore(){
@@ -1130,7 +1501,7 @@
     if(choicesEl){ choicesEl.innerHTML = ''; choicesEl.style.display = 'none'; }
     if(item.type==='line' && item.name){
       currentNameEl.style.display = '';
-      currentNameEl.textContent = item.name;
+      currentNameEl.textContent = applyVariables(item.name);
     } else {
       currentNameEl.textContent = '';
       currentNameEl.style.display = 'none'; // hide for subtitles
@@ -1138,9 +1509,13 @@
     if(item.type==='line'){
       cancelTextReveal();
       renderRichText(currentTextEl, item.text);
-      // Start per-character reveal at constant speed (prevents parallel wrapped lines)
-      try { startTextReveal(currentTextEl, { cps: 28 }); } catch {}
-      prevBtn.disabled = index === 0;
+      // Start per-character reveal using configured speed
+      try {
+        const v = speedSlider ? Number(speedSlider.value)||readSpeed() : readSpeed();
+        const cps = cpsFromSlider(v);
+        if(Number.isFinite(cps)) startTextReveal(currentTextEl, { cps });
+      } catch {}
+      if(prevBtn){ prevBtn.disabled = enableBacktrack ? index === 0 : true; }
       nextBtn.disabled = index >= view.length - 1;
     } else if(item.type==='decision'){
       cancelTextReveal();
@@ -1149,7 +1524,7 @@
         choicesEl.style.display = 'flex';
         for(const opt of item.options){
           const b = document.createElement('button');
-          b.textContent = opt.label;
+          b.textContent = applyVariables(opt.label);
           b.addEventListener('click', ()=>{
             selections[item.id] = opt.value;
             view = computeVisible(dialogues, selections);
@@ -1161,7 +1536,7 @@
           choicesEl.appendChild(b);
         }
       }
-      prevBtn.disabled = index === 0;
+      if(prevBtn){ prevBtn.disabled = enableBacktrack ? index === 0 : true; }
       nextBtn.disabled = !selections[item.id];
     }
     progressEl.textContent = ` ${index+1} / ${view.length}`;
@@ -1211,50 +1586,7 @@
       if(delayTimerId){ try{ clearTimeout(delayTimerId); }catch{} delayTimerId = null; }
       clearPendingEffects();
       for(const op of plan.ops){
-        if(op.type === 'blocker' && backgroundController && typeof backgroundController.applyBlocker === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ backgroundController.applyBlocker(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'image' && backgroundController && typeof backgroundController.apply === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ backgroundController.apply(op.entry); if(characterController && typeof characterController.applyFor === 'function'){ characterController.applyFor(dialogues, selections, op.entry); } }catch{} }, op.atMs));
-        } else if(op.type === 'curtain' && backgroundController && typeof backgroundController.applyCurtain === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ backgroundController.applyCurtain(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'audio' && audioController && typeof audioController.apply === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ audioController.apply(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'sound' && audioController && typeof audioController.playSound === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ audioController.playSound(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'character' && characterController && typeof characterController.applyFor === 'function'){
-          // Apply character changes relative to their own entry in the dialogue list
-          pendingEffectTimers.push(setTimeout(()=>{ try{ characterController.applyFor(dialogues, selections, op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'camerashake' && cameraController){
-          const els = [];
-          try{
-            if(backgroundController){
-              if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-              if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-              if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-              if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-              if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-              if(backgroundController.curtainLayer) els.push(backgroundController.curtainLayer);
-              if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-            }
-            if(characterController && characterController.layer){ els.push(characterController.layer); }
-          }catch{}
-          pendingEffectTimers.push(setTimeout(()=>{ try{ cameraController.shake(op.entry, els); }catch{} }, op.atMs));
-        } else if(op.type === 'cameraeffect' && effectsController){
-          const els = [];
-          try{
-            if(backgroundController){
-              if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-              if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-              if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-              if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-              if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-              if(backgroundController.curtainLayer) els.push(backgroundController.curtainLayer);
-              if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-            }
-            if(characterController && characterController.layer){ els.push(characterController.layer); }
-          }catch{}
-          pendingEffectTimers.push(setTimeout(()=>{ try{ effectsController.apply(op.entry, els); }catch{} }, op.atMs));
-        }
+        scheduleEffectOperation(op, op.atMs);
       }
       setHiddenDuringDelay(plan.shouldHideUI);
       // Unhide UI earlier only for non-blocking plans (not for Delay)
@@ -1271,32 +1603,7 @@
     } else if(waitMs > 0){
       // Non-blocking timeline: schedule ops but do not gate navigation
       for(const op of plan.ops){
-        if(op.type === 'blocker' && backgroundController && typeof backgroundController.applyBlocker === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ backgroundController.applyBlocker(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'image' && backgroundController && typeof backgroundController.apply === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ backgroundController.apply(op.entry); if(characterController && typeof characterController.applyFor === 'function'){ characterController.applyFor(dialogues, selections, op.entry); } }catch{} }, op.atMs));
-        } else if(op.type === 'audio' && audioController && typeof audioController.apply === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ audioController.apply(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'sound' && audioController && typeof audioController.playSound === 'function'){
-          pendingEffectTimers.push(setTimeout(()=>{ try{ audioController.playSound(op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'character' && characterController && typeof characterController.applyFor === 'function'){
-          // Apply character changes relative to their own entry in the dialogue list
-          pendingEffectTimers.push(setTimeout(()=>{ try{ characterController.applyFor(dialogues, selections, op.entry); }catch{} }, op.atMs));
-        } else if(op.type === 'camerashake' && cameraController){
-          const els = [];
-          try{
-            if(backgroundController){
-              if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-              if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-              if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-              if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-              if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-              if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-            }
-            if(characterController && characterController.layer){ els.push(characterController.layer); }
-          }catch{}
-          pendingEffectTimers.push(setTimeout(()=>{ try{ cameraController.shake(op.entry, els); }catch{} }, op.atMs));
-        }
+        scheduleEffectOperation(op, op.atMs);
       }
       // Temporarily hide UI only for hideMs (e.g., Image/Blocker with block=true)
       if(hideMs > 0){
@@ -1310,49 +1617,7 @@
     // Zero-duration transition: execute inline ops immediately
     if(plan.ops && plan.ops.length){
       for(const op of plan.ops){
-        try {
-          if(op.type === 'blocker' && backgroundController && typeof backgroundController.applyBlocker === 'function'){
-            backgroundController.applyBlocker(op.entry);
-          } else if(op.type === 'image' && backgroundController && typeof backgroundController.apply === 'function'){
-            backgroundController.apply(op.entry);
-            try{ if(characterController && typeof characterController.applyFor === 'function'){ characterController.applyFor(dialogues, selections, op.entry); } }catch{}
-          } else if(op.type === 'curtain' && backgroundController && typeof backgroundController.applyCurtain === 'function'){
-            backgroundController.applyCurtain(op.entry);
-          } else if(op.type === 'audio' && audioController && typeof audioController.apply === 'function'){
-            audioController.apply(op.entry);
-          } else if(op.type === 'sound' && audioController && typeof audioController.playSound === 'function'){
-            audioController.playSound(op.entry);
-          } else if(op.type === 'character' && characterController && typeof characterController.applyFor === 'function'){
-            characterController.applyFor(dialogues, selections, op.entry);
-          } else if(op.type === 'camerashake' && cameraController){
-            const els = [];
-            try{
-              if(backgroundController){
-                if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-                if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-                if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-                if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-                if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-              }
-              if(characterController && characterController.layer){ els.push(characterController.layer); }
-            }catch{}
-            cameraController.shake(op.entry, els);
-          } else if(op.type === 'cameraeffect' && effectsController){
-            const els = [];
-            try{
-              if(backgroundController){
-                if(backgroundController.bgLayer) els.push(backgroundController.bgLayer);
-                if(backgroundController.bgTweenLayer) els.push(backgroundController.bgTweenLayer);
-                if(backgroundController.imageLayer) els.push(backgroundController.imageLayer);
-                if(backgroundController.imageLayer2) els.push(backgroundController.imageLayer2);
-                if(backgroundController.tweenLayer) els.push(backgroundController.tweenLayer);
-                if(backgroundController.blockerLayer) els.push(backgroundController.blockerLayer);
-              }
-              if(characterController && characterController.layer){ els.push(characterController.layer); }
-            }catch{}
-            effectsController.apply(op.entry, els);
-          }
-        } catch {}
+        runEffectOperation(op);
       }
     }
     renderCurrentCore();
@@ -1360,6 +1625,21 @@
 
   function applyRouteFromHash(){
     const route = parseHash();
+    // Server switching via hash
+    const srv = route.server && SERVER_NAMES[route.server] ? route.server : SERVER_STRING;
+    if(srv !== currentServer){
+      currentServer = srv;
+      if(serverSelect && serverSelect.value !== srv){ serverSelect.value = srv; }
+      // Clear cached data that is server-specific
+      storyReview = null;
+      moduleData = null;
+      rogueData = null;
+      storyVariables = null;
+      clearDataCaches();
+      // Reload index for the new server; this will repopulate UI and continue routing
+      loadStoryIndex();
+      return;
+    }
     const chapterId = route.chapter && chapters[route.chapter] ? route.chapter : null;
     if(!chapterId){
       return; // wait for init to set default
@@ -1392,6 +1672,93 @@
 
   // Events: drive state via routing
   window.addEventListener('hashchange', applyRouteFromHash);
+  // Unlock audio on first user gesture (click, pointer, key)
+  (function initAudioUnlock(){
+    if(!audioController || typeof audioController.unlock !== 'function') return;
+    const once = () => {
+      try{ audioController.unlock(); }catch{}
+    };
+    const opts = { once: true, capture: true };
+    try{
+      window.addEventListener('pointerdown', once, opts);
+      window.addEventListener('keydown', once, opts);
+      window.addEventListener('click', once, opts);
+    }catch{}
+  })();
+
+  // Header collapse/expand toggle
+  (function initHeaderToggle(){
+    if(!headerToggleBtn) return;
+    function setCollapsed(on){
+      const b = document.body;
+      if(!b) return;
+      if(on){ b.classList.add('has-collapsed-header'); }
+      else { b.classList.remove('has-collapsed-header'); }
+      try{
+        headerToggleBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
+        headerToggleBtn.textContent = on ? '▼' : '▲';
+        headerToggleBtn.title = on ? 'Show header' : 'Hide header';
+      }catch{}
+    }
+    headerToggleBtn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const collapsed = document.body.classList.contains('has-collapsed-header');
+      setCollapsed(!collapsed);
+    });
+    // Start expanded
+    setCollapsed(false);
+  })();
+
+  // Initialize speed slider
+  (function initSpeed(){
+    if(!speedSlider){ return; }
+    const v = readSpeed();
+    speedSlider.value = String(v);
+    updateSpeedLabel();
+    const onChange = () => {
+      const val = Number(speedSlider.value)||0;
+      writeSpeed(val);
+      updateSpeedLabel();
+      // Apply to current line without reloading other systems
+      const item = view[index];
+      if(item && item.type === 'line'){
+        cancelTextReveal();
+        try{ renderRichText(currentTextEl, item.text); }catch{}
+        const cps = cpsFromSlider(val);
+        if(Number.isFinite(cps)){
+          try{ startTextReveal(currentTextEl, { cps }); }catch{}
+        }
+      }
+    };
+    speedSlider.addEventListener('input', onChange);
+    speedSlider.addEventListener('change', onChange);
+  })();
+
+  // Initialize player nickname input
+  (function initNickname(){
+    if(!playerNameInput){ return; }
+    playerNickname = readNickname();
+    if(playerNickname){ try{ playerNameInput.value = playerNickname; }catch{} }
+    const onChange = () => {
+      try{ playerNickname = String(playerNameInput.value || '').trim(); }catch{ playerNickname = ''; }
+      writeNickname(playerNickname);
+      // Re-render current line and log to reflect substitutions
+      try{ renderDialogues(view); }catch{}
+      try{ updateCurrent(); }catch{}
+    };
+    playerNameInput.addEventListener('input', onChange);
+    playerNameInput.addEventListener('change', onChange);
+  })();
+  // Populate server list and sync initial selection
+  populateServers();
+  if(serverSelect){
+    serverSelect.addEventListener('change', () => {
+      const srv = serverSelect.value;
+      // Update route preserving chapter/level; applyRouteFromHash will reload index
+      const r = parseHash();
+      setHashRoute(r.chapter, r.level, srv);
+    });
+  }
   if(categorySelect){
     categorySelect.addEventListener('change', () => {
       const cat = categorySelect.value;
@@ -1411,16 +1778,44 @@
   levelSelect.addEventListener('change', () => {
     setHashRoute(chapterSelect.value, levelSelect.value);
   });
-  prevBtn.addEventListener('click', () => { if(isDelaying) return; if(index>0){ index--; updateCurrent(); } });
-  nextBtn.addEventListener('click', () => {
+  function goNext(){
     if(isDelaying) return;
     const item = view[index];
     if(item && item.type === 'decision' && !selections[item.id]){ return; }
     if(index<view.length-1){ index++; updateCurrent(); }
-  });
+  }
+  if(enableBacktrack && prevBtn){
+    prevBtn.addEventListener('click', () => { if(isDelaying) return; if(index>0){ index--; updateCurrent(); } });
+  } else if(prevBtn){
+    prevBtn.disabled = true;
+    prevBtn.title = 'Back navigation is available only when running locally.';
+  }
+  nextBtn.addEventListener('click', () => { goNext(); });
+
+  // Advance on click anywhere except the header and interactive controls
+  document.addEventListener('click', (e) => {
+    try{
+      // Ignore if selecting text
+      const sel = window.getSelection ? window.getSelection() : null;
+      if(sel && typeof sel.toString === 'function' && sel.toString().length > 0){ return; }
+      // Ignore clicks inside header
+      const headerEl = document.querySelector('header');
+      if(headerEl && headerEl.contains(e.target)) return;
+      // Ignore clicks on controls/buttons to avoid double-advance
+      if(controlsEl && controlsEl.contains(e.target)) return;
+      const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+      if(tag === 'button' || tag === 'select' || tag === 'input' || tag === 'textarea' || tag === 'a' || tag === 'label') return;
+      // Ignore clicks inside open log modal
+      if(logModal && logModal.style.display === 'flex' && logModal.contains(e.target)) return;
+      // Ignore clicks on choice buttons (decisions)
+      if(choicesEl && choicesEl.contains(e.target)) return;
+      goNext();
+    }catch{}
+  }, true);
 
   // Helper: highlight the current line in the log
   function highlightLogCurrent(){
+    if(!enableDebugLog) return;
     if(!logModal || !logContainer) return;
     if(logModal.style.display !== 'flex') return; // only when visible
     const current = view && view[index] ? view[index] : null;
@@ -1435,6 +1830,7 @@
 
   // Log modal controls
   function openLog(){
+    if(!enableDebugLog) return;
     if(!logModal) return;
     logContainer.innerHTML = '';
     // Show full dialogues, including branches beyond current selections
@@ -1443,15 +1839,23 @@
     highlightLogCurrent();
   }
   function closeLog(){ if(logModal) logModal.style.display = 'none'; }
-  if(logBtn) logBtn.addEventListener('click', openLog);
-  if(closeLogBtn) closeLogBtn.addEventListener('click', closeLog);
-  if(logModal){
-    logModal.addEventListener('click', (e)=>{ if(e.target === logModal) closeLog(); });
-    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeLog(); });
+  if(enableDebugLog){
+    if(logBtn) logBtn.addEventListener('click', openLog);
+    if(closeLogBtn) closeLogBtn.addEventListener('click', closeLog);
+    if(logModal){
+      logModal.addEventListener('click', (e)=>{ if(e.target === logModal) closeLog(); });
+      window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeLog(); });
+    }
+  } else {
+    if(logBtn){
+      logBtn.disabled = true;
+      logBtn.style.display = 'none';
+    }
+    if(logModal){ logModal.remove(); }
   }
 
   // Jump to a line when clicking in the log
-  if(logContainer){
+  if(enableDebugLog && logContainer){
     logContainer.addEventListener('click', (e)=>{
       const line = e.target && e.target.closest ? e.target.closest('.line') : null;
       if(!line || !line.dataset || line.dataset.idx == null) return;
@@ -1497,14 +1901,3 @@
   // init
   loadStoryIndex();
 })();
-
-  const cameraAPI = window.StoryCamera || {};
-  const cameraController = cameraAPI.CameraShakeController
-    ? new cameraAPI.CameraShakeController()
-    : null;
-  const parseCameraShake = typeof cameraAPI.parseCameraShake === 'function' ? cameraAPI.parseCameraShake : null;
-
-
-
-
-

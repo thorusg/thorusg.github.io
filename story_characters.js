@@ -136,7 +136,7 @@
     return { type: 'dialog', raw: trimmed, guard: cloneGuard(guard) };
   }
 
-  // Per-slot sprite directive: [charslot(slot="l|r|m", name="...", duration=1.5, focus="l|r|m")]
+  // Per-slot sprite directive: [charslot(slot="l|r|m", name="...", duration=1.5, focus="l|r|m", isblock=true|false)]
   function parseCharSlotTag(raw, guard){
     if(!raw) return null;
     const trimmed = raw.trim();
@@ -191,6 +191,10 @@
     // Marker, currently unused but kept for completeness
     const endRaw = (params.end || '').toString().toLowerCase();
     const endMark = endRaw === 'true' || endRaw === '1';
+    // Support optional blocking/gating flag
+    const isBlockRaw = (params.isblock != null) ? String(params.isblock).trim().toLowerCase() : '';
+    const isBlock = (isBlockRaw === '1' || isBlockRaw === 'true' || isBlockRaw === 'yes');
+
     const entry = {
       type: 'charslot',
       raw: trimmed,
@@ -200,6 +204,7 @@
       duration,
       focus: null,
     };
+    entry.isBlock = isBlock;
     entry.action = action;
     entry.actionPower = Number.isFinite(powerRaw) ? powerRaw : null;
     entry.actionTimes = Number.isFinite(timesRaw) ? timesRaw : null;
@@ -581,6 +586,17 @@
         }
         this.assignSources(slot, sprite.sources);
       } else {
+        // Same key as before; ensure the <img> still points at a matching URL.
+        // If a prior clear/fade-out removed src, we must reassign sources.
+        try {
+          const srcNow = String(slot.img && slot.img.src || '');
+          const expectSub = String(sprite.key || '').split('#')[0];
+          if(!srcNow || (expectSub && srcNow.indexOf(expectSub) < 0)){
+            this.assignSources(slot, sprite.sources);
+          }
+        } catch(_){
+          this.assignSources(slot, sprite.sources);
+        }
         slot.pendingFadeIn = null;
         // No fade requested and key unchanged: preserve current opacity/transition
       }
@@ -774,7 +790,9 @@
           slot.pendingLoader = null;
           img.dataset.sourceIndex = String(index);
           if(img.src !== url){
-            img.src = url;
+            // Set both property and attribute so CSS [src*="..."] rules reliably match
+            try { img.src = url; } catch(_){ }
+            try { img.setAttribute('src', url); } catch(_){ }
           }
         };
 

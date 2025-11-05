@@ -1,11 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="icon" href="favicon.ico">
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Story Reader</title>
   <link rel="stylesheet" href="app.css">
-  <link rel="stylesheet" href="sprite-assets.css" id="spriteCss">
+  <link rel="stylesheet" href="sprite-recttransform.css" id="spriteCss">
   <script>
     // Ensure assets base is available before any module initializes
     window.DATA_ASSETS = 'https://raw.githubusercontent.com/akgcc/arkdata/main/assets/';
@@ -17,9 +18,12 @@
   <script defer src="story_effects.js"></script>
   <script defer src="app.js"></script>
   <script>
-    // Lightweight live-reload for sprite-assets.css without page refresh
+    // Lightweight live-reload for sprite-recttransform.css without page refresh
     (function(){
-      var CSS_PATH = 'sprite-assets.css';
+      var host = (window.location && window.location.hostname) || '';
+      var shouldEnable = !!(window.ENABLE_SPRITE_DEV_RELOAD || /^localhost$|^127\.0\.0\.1$/.test(host));
+      if(!shouldEnable) return;
+      var CSS_PATH = 'sprite-recttransform.css';
       var link = document.getElementById('spriteCss');
       if(!link) return;
       var lastTag = null;
@@ -54,7 +58,11 @@
   <noscript>This page requires JavaScript to function.</noscript>
 </head>
 <body>
-  <header>
+  <header id="appHeader">
+    <label>
+      Server:
+      <select id="serverSelect"></select>
+    </label>
     <label>
       Category:
       <select id="categorySelect"></select>
@@ -67,8 +75,18 @@
       Level:
       <select id="levelSelect"></select>
     </label>
+    <label>
+      Text speed:
+      <input id="speedSlider" type="range" min="0" max="100" step="1">
+      <span id="speedValue" class="muted"></span>
+    </label>
+    <label>
+      Player name:
+      <input id="playerName" type="text" placeholder="{@nickname}" maxlength="32" />
+    </label>
     <span id="status" class="muted"></span>
   </header>
+  <button id="headerToggle" aria-controls="appHeader" aria-expanded="true" title="Hide header">▲</button>
 
   <section id="current" hidden>
     <div class="name" id="currentName"></div>
@@ -101,8 +119,3 @@
   </div>
 </body>
 </html>
-
-
-
-
-

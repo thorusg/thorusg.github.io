@@ -1,4 +1,5 @@
-examples/
 content/
 sprite_script/
 .vscode/
+RectTransform/
+bc/

@@ -74,7 +74,7 @@
       entry.yScaleFrom = num(yScaleFromMatch);
       entry.xScaleTo = num(xScaleToMatch);
       entry.yScaleTo = num(yScaleToMatch);
-    } else if(tag === 'image'){
+    } else if(tag === 'image' || tag === 'background'){
       const num = (m) => (m && m[1] != null && Number.isFinite(Number(m[1])) ? Number(m[1]) : null);
       entry.x = num(xMatch);
       entry.y = num(yMatch);
@@ -210,6 +210,7 @@
       this._uiBlockTimer = null;
       this._currentBlockerRef = null;
       this._lastAppliedImageIndex = -1;
+      this._lastImageParams = null;
       // Foreground image layers for [Image(...)] crossfade + block
       this.imageLayer = null;   // primary (index 0)
       this.imageInner = null;
@@ -233,6 +234,8 @@
       this.curtainLayer = null;
       this.curtainTop = null;
       this.curtainBottom = null;
+      this.curtainLeft = null;
+      this.curtainRight = null;
       if(this.root && global.document){
         // Background crossfade layer (below characters and image layer)
         const bgl = global.document.createElement('div');
@@ -363,20 +366,38 @@
         bottomBar.style.bottom = '0';
         bottomBar.style.height = '0%';
         bottomBar.style.backgroundColor = '#000';
+        const leftBar = global.document.createElement('div');
+        leftBar.style.position = 'absolute';
+        leftBar.style.top = '0';
+        leftBar.style.bottom = '0';
+        leftBar.style.left = '0';
+        leftBar.style.width = '0%';
+        leftBar.style.backgroundColor = '#000';
+        const rightBar = global.document.createElement('div');
+        rightBar.style.position = 'absolute';
+        rightBar.style.top = '0';
+        rightBar.style.bottom = '0';
+        rightBar.style.right = '0';
+        rightBar.style.width = '0%';
+        rightBar.style.backgroundColor = '#000';
         cur.appendChild(topBar);
         cur.appendChild(bottomBar);
+        cur.appendChild(leftBar);
+        cur.appendChild(rightBar);
         this.root.appendChild(cur);
         this.curtainLayer = cur;
         this.curtainTop = topBar;
         this.curtainBottom = bottomBar;
-        // tween layer (above bg, below characters). Place after image layers to sit on top if same z-index
+        this.curtainLeft = leftBar;
+        this.curtainRight = rightBar;
+        // tween layer (above bg, above characters). Place after image layers to sit on top
         const twl = global.document.createElement('div');
         twl.style.position = 'fixed';
         twl.style.inset = '0';
         twl.style.pointerEvents = 'none';
         twl.style.opacity = '0';
         twl.style.transition = 'opacity 0.25s ease';
-        twl.style.zIndex = '5';
+        twl.style.zIndex = '6';
         const twi = global.document.createElement('div');
         twi.style.position = 'absolute';
         twi.style.inset = '0';
@@ -417,16 +438,24 @@
     reset(){
       if(this._pendingTweenTimer){ try{ clearTimeout(this._pendingTweenTimer); }catch{} this._pendingTweenTimer = null; }
       this._pendingTweenIndex = -1;
+      if(this._pendingImageTimer){ try{ clearTimeout(this._pendingImageTimer); }catch{} this._pendingImageTimer = null; }
+      if(this._pendingBgTimer){ try{ clearTimeout(this._pendingBgTimer); }catch{} this._pendingBgTimer = null; }
+      if(this._pendingImageSwapTimer){ try{ clearTimeout(this._pendingImageSwapTimer); }catch{} this._pendingImageSwapTimer = null; }
       this.apply(null);
       this._currentBlockerRef = null;
       this._uiBlockUntil = 0;
       if(this._uiBlockTimer){ try{ clearTimeout(this._uiBlockTimer); }catch{} this._uiBlockTimer = null; }
       this._applyUiBlockState(false);
+      // Ensure visual overlays are cleared immediately
+      try{ this.applyBlocker(null); }catch{}
+      try{ this.applyCurtain(null); }catch{}
       this._lastAppliedImageIndex = -1;
       // Reset curtain
       try{
         if(this.curtainTop){ this.curtainTop.style.transition = 'height 0.25s linear'; this.curtainTop.style.height = '0%'; }
         if(this.curtainBottom){ this.curtainBottom.style.transition = 'height 0.25s linear'; this.curtainBottom.style.height = '0%'; }
+        if(this.curtainLeft){ this.curtainLeft.style.transition = 'width 0.25s linear'; this.curtainLeft.style.width = '0%'; }
+        if(this.curtainRight){ this.curtainRight.style.transition = 'width 0.25s linear'; this.curtainRight.style.width = '0%'; }
       }catch{}
     }
     _assetKey(entry){
@@ -441,15 +470,26 @@
       let path = String(image).trim();
       if(!path) return '';
       path = path.replace(/\\+/g, '/');
+      // Normalize filename segment to lowercase to tolerate script case variants
+      const lowerLastSegment = (p) => {
+        const clean = String(p || '').replace(/^\/+/, '');
+        const idx = clean.lastIndexOf('/');
+        if(idx < 0){ return clean.toLowerCase(); }
+        const dir = clean.slice(0, idx);
+        const file = clean.slice(idx + 1);
+        return `${dir}/${file.toLowerCase()}`;
+      };
       if(ABS_PATTERN.test(path)){
+        // Respect absolute URL casing as-is
         return this.ensureExtension(path);
       }
       if(path.startsWith('./') || path.startsWith('../')){
-        return this.ensureExtension(path);
+        return this.ensureExtension(lowerLastSegment(path));
       }
       const normalized = path.replace(/^\/+/, '');
-      if(normalized.includes('/')){
-        return this.ensureExtension(`${this.assetRoot}/${normalized}`);
+      const normalizedLower = lowerLastSegment(normalized);
+      if(normalizedLower.includes('/')){
+        return this.ensureExtension(`${this.assetRoot}/${normalizedLower}`);
       }
       const isBackground = (tag === 'background' || tag === 'backgroundtween');
       const dirs = isBackground
@@ -457,10 +497,10 @@
         : [this.imageDir, this.backgroundDir];
       for(const dir of dirs){
         if(!dir) continue;
-        const candidate = `${this.assetRoot}/${dir.replace(/\\+/g, '/')}/${normalized}`;
+        const candidate = `${this.assetRoot}/${dir.replace(/\\+/g, '/')}/${normalizedLower}`;
         return this.ensureExtension(candidate);
       }
-      return this.ensureExtension(`${this.assetRoot}/${normalized}`);
+      return this.ensureExtension(`${this.assetRoot}/${normalizedLower}`);
     }
     ensureExtension(path){
       if(/^data:/i.test(path)) return path;
@@ -523,9 +563,9 @@
       const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
       const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
       const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : curT.tx) || 0;
-      const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : curT.ty) || 0;
+      const ty0 = (entry.yFrom != null ? -Number(entry.yFrom) : curT.ty) || 0;
       const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-      const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
+      const ty1 = (entry.yTo != null ? -Number(entry.yTo) : ty0);
       const inner = this._activeImageContent();
       if(!inner) return;
       const minS = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
@@ -537,18 +577,54 @@
         inner.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscan}, ${sy1 * overscan})`;
       });
     }
-    apply(entry){
+  apply(entry){
       const root = this.root;
       if(!root) return;
       if(this._pendingBgTimer){ try{ clearTimeout(this._pendingBgTimer); }catch{} this._pendingBgTimer = null; }
-      const key = entry ? `${entry.image || ''}|${entry.tiled ? 't' : 'f'}|${entry.tag || ''}` : '__none__';
-      if(this.currentKey === key) return;
-      this.currentKey = key;
-      this._currentAssetKey = this._assetKey(entry);
+      // Compute key; ignore 'tiled' for [Image] so toggling it has no effect
       const tag = entry && entry.tag ? String(entry.tag).toLowerCase() : '';
       const isImageTag = tag === 'image';
       const isTweenTag = tag === 'imagetween';
       const isBgTweenTag = tag === 'backgroundtween';
+      const isBgTag = tag === 'background';
+      const tileFlag = (tag === 'image') ? 'f' : (entry && entry.tiled ? 't' : 'f');
+      const key = entry ? `${entry.image || ''}|${tileFlag}|${tag}` : '__none__';
+      // If the same image is being reapplied, still allow transform-only updates for [Image]
+      if(this.currentKey === key){
+        if(isImageTag){
+          const content = this._activeImageContent();
+          if(content){
+            const tx = (entry.x != null ? Number(entry.x) : 0) || 0;
+            const yParam = (entry.y != null ? Number(entry.y) : null);
+            const ty = (yParam != null ? -yParam : 0);
+            const sx = (entry.xScale != null ? Number(entry.xScale) : 1) || 1;
+            const sy = (entry.yScale != null ? Number(entry.yScale) : sx) || sx;
+            try { content.style.transition = ''; } catch{}
+            try { content.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`; } catch{}
+            // Keep last params in script domain for tween base
+            this._lastImageParams = { x: tx, y: (yParam != null ? yParam : 0), xScale: sx, yScale: sy };
+          }
+        } else if(isBgTag){
+          // Allow transform-only updates for [Background] reapply on the same asset
+          const inner = this.bgInner;
+          if(inner){
+            const tx = (entry.x != null ? Number(entry.x) : 0) || 0;
+            const yParam = (entry.y != null ? Number(entry.y) : null);
+            const ty = (yParam != null ? -yParam : 0); // invert script Y
+            const sx = (entry.xScale != null ? Number(entry.xScale) : 1) || 1;
+            const sy = (entry.yScale != null ? Number(entry.yScale) : sx) || sx;
+            try { inner.style.transition = ''; } catch{}
+            try {
+              inner.style.transformOrigin = 'center center';
+              inner.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+            } catch{}
+          }
+        }
+        return;
+      }
+      this.currentKey = key;
+      this._currentAssetKey = this._assetKey(entry);
+      // tag already computed above
       const fadeSec = entry && Number.isFinite(entry.fadeTime) ? Number(entry.fadeTime) : (entry && entry.fadeTime != null ? Number(entry.fadeTime) : null);
       const fade = Number.isFinite(fadeSec) && fadeSec > 0 ? fadeSec : 0;
       // If no entry is provided (e.g., on level change/reset), clear overlay and background
@@ -558,6 +634,7 @@
         root.style.backgroundRepeat = 'no-repeat';
         root.style.backgroundSize = 'contain';
         root.style.backgroundPosition = 'center center';
+        this._lastImageParams = null;
         if(this._pendingImageSwapTimer){ try{ clearTimeout(this._pendingImageSwapTimer);}catch{} this._pendingImageSwapTimer = null; }
         if(this.imageLayer){ this.imageLayer.style.opacity = '0'; this.imageLayer.style.transition = 'opacity 0.25s ease'; }
         if(this.imageContent){ this.imageContent.style.backgroundImage = 'none'; this.imageContent.style.transform = 'translate(0px, 0px) scale(1, 1)'; this.imageContent.style.transition = ''; }
@@ -569,7 +646,7 @@
         if(this.bgTweenContent){ this.bgTweenContent.style.backgroundImage = 'none'; this.bgTweenContent.style.transform = 'translate(0px, 0px) scale(1, 1)'; this.bgTweenContent.style.transition = ''; }
         this._imageActiveIndex = 0;
         if(this.bgLayer){ this.bgLayer.style.opacity = '0'; }
-        if(this.bgInner){ this.bgInner.style.backgroundImage = 'none'; }
+        if(this.bgInner){ this.bgInner.style.backgroundImage = 'none'; this.bgInner.style.transform = 'translate(0px, 0px) scale(1, 1)'; this.bgInner.style.transition = ''; }
         return;
       }
       if(entry && entry.image){
@@ -587,16 +664,21 @@
           // configure target layer
           toLayer.style.transition = `opacity ${fade || 0.25}s ease`;
           toContent.style.backgroundImage = `url('${url}')`;
-          toContent.style.backgroundRepeat = entry.tiled ? 'repeat' : 'no-repeat';
-          toContent.style.backgroundSize = entry.tiled ? 'auto' : 'cover';
+          // Ignore 'tiled' for [Image]: always no-repeat and cover
+          toContent.style.backgroundRepeat = 'no-repeat';
+          toContent.style.backgroundSize = 'cover';
           // Ensure transforms for plain [Image] from provided x/y/xScale/yScale
+          // Script coordinates: positive Y is up. Convert to CSS by negating Y.
           if(!isTweenTag){
             const tx = (entry.x != null ? Number(entry.x) : 0) || 0;
-            const ty = (entry.y != null ? Number(entry.y) : 0) || 0;
+            const yParam = (entry.y != null ? Number(entry.y) : null);
+            const ty = (yParam != null ? -yParam : 0);
             const sx = (entry.xScale != null ? Number(entry.xScale) : 1) || 1;
             const sy = (entry.yScale != null ? Number(entry.yScale) : sx) || sx;
             toContent.style.transition = '';
             toContent.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+            // Store last params in script domain so subsequent tweens inherit correctly
+            this._lastImageParams = { x: tx, y: (yParam != null ? yParam : 0), xScale: sx, yScale: sy };
           }
           // stack order: show new above old
           toLayer.style.zIndex = '5';
@@ -623,21 +705,64 @@
           else { done(); }
           // If tween requested, also animate scale/position on the target inner
           if(isTweenTag && toContent){
+            const toFinite = (value) => {
+              if(value == null) return null;
+              const n = typeof value === 'number' ? value : Number(value);
+              return Number.isFinite(n) ? n : null;
+            };
+            const pickFinite = (...values) => {
+              for(let i = 0; i < values.length; i++){
+                const n = toFinite(values[i]);
+                if(n != null) return n;
+              }
+              return null;
+            };
             const dur = Number(entry.duration||0) || 0;
-            const sx0 = Number(entry.xScaleFrom||1) || 1;
-            const sy0 = Number(entry.yScaleFrom||sx0) || sx0;
-            const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
-            const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
-            const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : 0) || 0;
-            const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : 0) || 0;
-            const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-            const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
-            const minS = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
+            const priorTransform = this._readTransformOf(fromContent);
+            const baseParams = entry._baseParams || null;
+          // Only inherit from previous [Image] params. If missing there too, default to 1.
+          const startScaleX = pickFinite(entry.xScaleFrom, baseParams && baseParams.xScale, 1);
+          const startScaleY = pickFinite(entry.yScaleFrom, baseParams && baseParams.yScale, startScaleX, 1);
+            const endScaleX = pickFinite(entry.xScaleTo, startScaleX);
+            const endScaleY = pickFinite(entry.yScaleTo, startScaleY, endScaleX);
+          // Only inherit from previous [Image] params. If missing there too, default to 0.
+          const startX = pickFinite(entry.xFrom, baseParams && baseParams.x, 0);
+            const endX = pickFinite(entry.xTo, startX);
+          const baseYParam = toFinite(baseParams && baseParams.y);
+          const fallbackY = 0;
+            const startYParam = entry.yFrom != null ? toFinite(entry.yFrom) : baseYParam;
+            const startYCss = entry.yFrom != null
+              ? (startYParam != null ? -startYParam : fallbackY)
+              : (baseYParam != null ? baseYParam : fallbackY);
+            const endYParam = entry.yTo != null ? toFinite(entry.yTo)
+              : (entry.yFrom != null ? startYParam : baseYParam);
+            let endYCss;
+            if(entry.yTo != null){
+              endYCss = endYParam != null ? -endYParam : (entry.yFrom != null ? startYCss : fallbackY);
+            } else if(entry.yFrom != null){
+              endYCss = startYCss;
+            } else {
+              endYCss = endYParam != null ? endYParam : startYCss;
+            }
+            const minS = Math.max(0.0001, Math.min(startScaleX, startScaleY, endScaleX, endScaleY));
             const overscan = minS < 1 ? (1 / minS) : 1;
             toContent.style.transition = dur > 0 ? `transform ${dur}s linear` : '';
-            toContent.style.transform = `translate(${tx0}px, ${ty0}px) scale(${sx0 * overscan}, ${sy0 * overscan})`;
-            // UI hide handled by app.js
-            requestAnimationFrame(()=>{ toContent && (toContent.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscan}, ${sy1 * overscan})`); });
+            toContent.style.transform = `translate(${startX}px, ${startYCss}px) scale(${startScaleX * overscan}, ${startScaleY * overscan})`;
+            requestAnimationFrame(()=>{
+              if(!toContent) return;
+              toContent.style.transform = `translate(${endX}px, ${endYCss}px) scale(${endScaleX * overscan}, ${endScaleY * overscan})`;
+            });
+            const finalXParam = endX != null ? endX : startX;
+            const finalYParam = endYParam != null ? endYParam : (startYParam != null ? startYParam : (baseYParam != null ? baseYParam : fallbackY));
+            const finalScaleXParam = endScaleX != null ? endScaleX : startScaleX;
+            let finalScaleYParam = endScaleY != null ? endScaleY : startScaleY;
+            if(finalScaleYParam == null) finalScaleYParam = finalScaleXParam;
+            this._lastImageParams = {
+              x: finalXParam,
+              y: finalYParam != null ? finalYParam : 0,
+              xScale: finalScaleXParam != null ? finalScaleXParam : 1,
+              yScale: finalScaleYParam != null ? finalScaleYParam : (finalScaleXParam != null ? finalScaleXParam : 1),
+            };
           }
         } else if(isTweenTag && this.tweenLayer && this.tweenInner){
           // Render [ImageTween] on dedicated tween layer (above background, below sprites)
@@ -658,19 +783,65 @@
           try{ setTimeout(()=>{ try{ if(this.imageLayer){ this.imageLayer.style.opacity = '0'; } if(this.imageLayer2){ this.imageLayer2.style.opacity = '0'; } }catch{} }, 250); }catch{}
           // Apply tween transform on tween inner
           const dur = Number(entry.duration||0) || 0;
-          const sx0 = (entry.xScaleFrom != null ? Number(entry.xScaleFrom) : 1) || 1;
-          const sy0 = (entry.yScaleFrom != null ? Number(entry.yScaleFrom) : sx0) || sx0;
-          const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
-          const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
-          const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : 0) || 0;
-          const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : 0) || 0;
-          const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-          const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
-          const minS2 = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
+          const toFinite = (value) => {
+            if(value == null) return null;
+            const n = typeof value === 'number' ? value : Number(value);
+            return Number.isFinite(n) ? n : null;
+          };
+          const pickFinite = (...values) => {
+            for(let i = 0; i < values.length; i++){
+              const n = toFinite(values[i]);
+              if(n != null) return n;
+            }
+            return null;
+          };
+          const baseParams = entry._baseParams || null;
+          const startScaleX = pickFinite(entry.xScaleFrom, baseParams && baseParams.xScale, 1);
+          const startScaleY = pickFinite(entry.yScaleFrom, baseParams && baseParams.yScale, startScaleX, 1);
+          const endScaleX = pickFinite(entry.xScaleTo, startScaleX);
+          const endScaleY = pickFinite(entry.yScaleTo, startScaleY, endScaleX);
+          const startX = pickFinite(entry.xFrom, baseParams && baseParams.x, 0);
+          const endX = pickFinite(entry.xTo, startX);
+          const baseYParam = toFinite(baseParams && baseParams.y);
+          const fallbackY = 0;
+          const startYParam = entry.yFrom != null ? toFinite(entry.yFrom) : baseYParam;
+          // Background invert: when falling back to base y, flip sign for CSS
+          const baseYCss = (baseYParam != null ? -baseYParam : fallbackY);
+          const startYCss = entry.yFrom != null
+            ? (startYParam != null ? -startYParam : fallbackY)
+            : baseYCss;
+          const endYParam = entry.yTo != null ? toFinite(entry.yTo)
+            : (entry.yFrom != null ? startYParam : baseYParam);
+          let endYCss;
+          if(entry.yTo != null){
+            endYCss = endYParam != null ? -endYParam : (entry.yFrom != null ? startYCss : fallbackY);
+          } else if(entry.yFrom != null){
+            endYCss = startYCss;
+          } else {
+            endYCss = (endYParam != null ? -endYParam : startYCss);
+          }
+          const minS2 = Math.max(0.0001, Math.min(startScaleX, startScaleY, endScaleX, endScaleY));
           const overscan2 = minS2 < 1 ? (1 / minS2) : 1;
+          // Ensure browser registers initial transform before animating
+          inner.style.transition = '';
+          inner.style.transform = `translate(${startX}px, ${startYCss}px) scale(${startScaleX * overscan2}, ${startScaleY * overscan2})`;
+          try{ void (inner.offsetWidth); }catch{}
           inner.style.transition = dur > 0 ? `transform ${dur}s linear` : '';
-          inner.style.transform = `translate(${tx0}px, ${ty0}px) scale(${sx0 * overscan2}, ${sy0 * overscan2})`;
-          requestAnimationFrame(()=>{ inner && (inner.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscan2}, ${sy1 * overscan2})`); });
+          requestAnimationFrame(()=>{
+            if(!inner) return;
+            inner.style.transform = `translate(${endX}px, ${endYCss}px) scale(${endScaleX * overscan2}, ${endScaleY * overscan2})`;
+          });
+          const finalXParam = endX != null ? endX : startX;
+          const finalYParam = endYParam != null ? endYParam : (startYParam != null ? startYParam : (baseYParam != null ? baseYParam : fallbackY));
+          const finalScaleXParam = endScaleX != null ? endScaleX : startScaleX;
+          let finalScaleYParam = endScaleY != null ? endScaleY : startScaleY;
+          if(finalScaleYParam == null) finalScaleYParam = finalScaleXParam;
+          this._lastImageParams = {
+            x: finalXParam,
+            y: finalYParam != null ? finalYParam : 0,
+            xScale: finalScaleXParam != null ? finalScaleXParam : 1,
+            yScale: finalScaleYParam != null ? finalScaleYParam : (finalScaleXParam != null ? finalScaleXParam : 1),
+          };
         } else if(isBgTweenTag && this.bgTweenLayer && this.bgTweenInner){
           // Render [BackgroundTween] on dedicated background tween layer (above bg, below images)
           const layer = this.bgTweenLayer;
@@ -687,21 +858,51 @@
           requestAnimationFrame(()=>{ layer && (layer.style.opacity = '1'); });
           // Hide still background layer after a short delay to avoid flicker
           try{ setTimeout(()=>{ try{ if(this.bgLayer){ this.bgLayer.style.opacity = '0'; } }catch{} }, 250); }catch{}
-          // Apply tween transform on bg tween inner
+          // Apply tween transform on bg tween inner using ImageTween precedence rules
           const dur = Number(entry.duration||0) || 0;
-          const sx0 = (entry.xScaleFrom != null ? Number(entry.xScaleFrom) : 1) || 1;
-          const sy0 = (entry.yScaleFrom != null ? Number(entry.yScaleFrom) : sx0) || sx0;
-          const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
-          const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
-          const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : 0) || 0;
-          const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : 0) || 0;
-          const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-          const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
-          const minSbg = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
+          const toFinite = (value) => {
+            if(value == null) return null;
+            const n = typeof value === 'number' ? value : Number(value);
+            return Number.isFinite(n) ? n : null;
+          };
+          const pickFinite = (...values) => {
+            for(let i = 0; i < values.length; i++){
+              const n = toFinite(values[i]);
+              if(n != null) return n;
+            }
+            return null;
+          };
+          const baseParams = entry._baseParams || null;
+          const startScaleX = pickFinite(entry.xScaleFrom, baseParams && baseParams.xScale, 1);
+          const startScaleY = pickFinite(entry.yScaleFrom, baseParams && baseParams.yScale, startScaleX, 1);
+          const endScaleX = pickFinite(entry.xScaleTo, startScaleX);
+          const endScaleY = pickFinite(entry.yScaleTo, startScaleY, endScaleX);
+          const startX = pickFinite(entry.xFrom, baseParams && baseParams.x, 0);
+          const endX = pickFinite(entry.xTo, startX);
+          const baseYParam = toFinite(baseParams && baseParams.y);
+          const fallbackY = 0;
+          const startYParam = entry.yFrom != null ? toFinite(entry.yFrom) : baseYParam;
+          const startYCss = entry.yFrom != null
+            ? (startYParam != null ? -startYParam : fallbackY)
+            : (baseYParam != null ? baseYParam : fallbackY);
+          const endYParam = entry.yTo != null ? toFinite(entry.yTo)
+            : (entry.yFrom != null ? startYParam : baseYParam);
+          let endYCss;
+          if(entry.yTo != null){
+            endYCss = endYParam != null ? -endYParam : (entry.yFrom != null ? startYCss : fallbackY);
+          } else if(entry.yFrom != null){
+            endYCss = startYCss;
+          } else {
+            endYCss = endYParam != null ? endYParam : startYCss;
+          }
+          const minSbg = Math.max(0.0001, Math.min(startScaleX, startScaleY, endScaleX, endScaleY));
           const overscanBg = minSbg < 1 ? (1 / minSbg) : 1;
+          // Commit initial state, then animate
+          inner.style.transition = '';
+          inner.style.transform = `translate(${startX}px, ${startYCss}px) scale(${startScaleX * overscanBg}, ${startScaleY * overscanBg})`;
+          try{ void (inner.offsetWidth); }catch{}
           inner.style.transition = dur > 0 ? `transform ${dur}s linear` : '';
-          inner.style.transform = `translate(${tx0}px, ${ty0}px) scale(${sx0 * overscanBg}, ${sy0 * overscanBg})`;
-          requestAnimationFrame(()=>{ inner && (inner.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscanBg}, ${sy1 * overscanBg})`); });
+          requestAnimationFrame(()=>{ if(inner){ inner.style.transform = `translate(${endX}px, ${endYCss}px) scale(${endScaleX * overscanBg}, ${endScaleY * overscanBg})`; } });
         } else {
           // Background image: keep it on the dedicated bgLayer so camera effects (e.g., grayscale)
           // can target and affect it. Do not commit to document.body background.
@@ -709,25 +910,81 @@
             // Ensure body uses default color and no background image
             root.style.backgroundColor = this.defaultColor;
             root.style.backgroundImage = 'none';
-            // Configure background layer content
-            this.bgInner.style.backgroundImage = url ? `url('${url}')` : 'none';
-            this.bgInner.style.backgroundRepeat = entry.tiled ? 'repeat' : 'no-repeat';
-            this.bgInner.style.backgroundSize = entry.tiled ? 'auto' : 'contain';
-            this.bgInner.style.backgroundPosition = 'center center';
-            // Apply fade if requested
-            const fadeDur = fade || 0;
-            this.bgLayer.style.transition = `opacity ${fadeDur}s ease`;
-            // Start from 0 only when fading; otherwise snap visible
-            if(fadeDur > 0){ this.bgLayer.style.opacity = '0'; }
-            requestAnimationFrame(()=>{ if(this.bgLayer){ this.bgLayer.style.opacity = '1'; } });
-          } else {
-            // Fallback: set on body if no layer was created (unlikely)
-            root.style.backgroundColor = this.defaultColor;
-            root.style.backgroundImage = url ? `url('${url}')` : 'none';
-            root.style.backgroundRepeat = entry.tiled ? 'repeat' : 'no-repeat';
-            root.style.backgroundSize = entry.tiled ? 'auto' : 'contain';
-            root.style.backgroundPosition = 'center center';
+          // Configure background layer content
+          this.bgInner.style.backgroundImage = url ? `url('${url}')` : 'none';
+          this.bgInner.style.backgroundRepeat = entry.tiled ? 'repeat' : 'no-repeat';
+          this.bgInner.style.backgroundSize = entry.tiled ? 'auto' : 'contain';
+          this.bgInner.style.backgroundPosition = 'center center';
+          // Apply transform from [Background] params (invert Y)
+          try{
+            const tx = (entry.x != null ? Number(entry.x) : 0) || 0;
+            const yParam = (entry.y != null ? Number(entry.y) : null);
+            const ty = (yParam != null ? -yParam : 0);
+            const sx = (entry.xScale != null ? Number(entry.xScale) : 1) || 1;
+            const sy = (entry.yScale != null ? Number(entry.yScale) : sx) || sx;
+            this.bgInner.style.transition = '';
+            this.bgInner.style.transformOrigin = 'center center';
+            this.bgInner.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+          }catch{}
+          // Apply fade if requested
+          const fadeDur = fade || 0;
+          this.bgLayer.style.transition = `opacity ${fadeDur}s ease`;
+          // Start from 0 only when fading; otherwise snap visible
+          if(fadeDur > 0){ this.bgLayer.style.opacity = '0'; }
+          requestAnimationFrame(()=>{ if(this.bgLayer){ this.bgLayer.style.opacity = '1'; } });
+          // Also clear any active BackgroundTween overlay using the same fade
+          if(this.bgTweenLayer){
+            try{
+              this.bgTweenLayer.style.transition = `opacity ${fadeDur}s ease`;
+              this.bgTweenLayer.style.opacity = '0';
+              if(this.bgTweenContent){
+                if(fadeDur > 0){
+                  setTimeout(()=>{
+                    try{
+                      this.bgTweenContent.style.backgroundImage = 'none';
+                      this.bgTweenContent.style.transform = 'translate(0px, 0px) scale(1, 1)';
+                      this.bgTweenContent.style.transition = '';
+                    }catch{}
+                  }, fadeDur * 1000);
+                } else {
+                  this.bgTweenContent.style.backgroundImage = 'none';
+                  this.bgTweenContent.style.transform = 'translate(0px, 0px) scale(1, 1)';
+                  this.bgTweenContent.style.transition = '';
+                }
+              }
+            }catch{}
           }
+        } else {
+          // Fallback: set on body if no layer was created (unlikely)
+          root.style.backgroundColor = this.defaultColor;
+          root.style.backgroundImage = url ? `url('${url}')` : 'none';
+          root.style.backgroundRepeat = entry.tiled ? 'repeat' : 'no-repeat';
+          root.style.backgroundSize = entry.tiled ? 'auto' : 'contain';
+          root.style.backgroundPosition = 'center center';
+          // Also clear BackgroundTween layer if present (no bgLayer fade available)
+          if(this.bgTweenLayer){
+            try{
+              const fadeDur = fade || 0;
+              this.bgTweenLayer.style.transition = `opacity ${fadeDur}s ease`;
+              this.bgTweenLayer.style.opacity = '0';
+              if(this.bgTweenContent){
+                if(fadeDur > 0){
+                  setTimeout(()=>{
+                    try{
+                      this.bgTweenContent.style.backgroundImage = 'none';
+                      this.bgTweenContent.style.transform = 'translate(0px, 0px) scale(1, 1)';
+                      this.bgTweenContent.style.transition = '';
+                    }catch{}
+                  }, fadeDur * 1000);
+                } else {
+                  this.bgTweenContent.style.backgroundImage = 'none';
+                  this.bgTweenContent.style.transform = 'translate(0px, 0px) scale(1, 1)';
+                  this.bgTweenContent.style.transition = '';
+                }
+              }
+            }catch{}
+          }
+        }
         }
       } else if(isTweenTag && this.tweenLayer && this.tweenInner){
         // ImageTween with no image: copy current [Image] layer content and animate it
@@ -785,25 +1042,69 @@
         try{ setTimeout(()=>{ try{ if(this.imageLayer){ this.imageLayer.style.opacity = '0'; } if(this.imageLayer2){ this.imageLayer2.style.opacity = '0'; } }catch{} }, 250); }catch{}
         // Apply tween transform
         const dur = Number(entry.duration||0) || 0;
+        const toFinite = (value) => {
+          if(value == null) return null;
+          const n = typeof value === 'number' ? value : Number(value);
+          return Number.isFinite(n) ? n : null;
+        };
+        const pickFinite = (...values) => {
+          for(let i = 0; i < values.length; i++){
+            const n = toFinite(values[i]);
+            if(n != null) return n;
+          }
+          return null;
+        };
         const cur = this._readTransformOf(srcInner);
         const baseT = entry._baseTransform || null;
-        const sx0 = (entry.xScaleFrom != null ? Number(entry.xScaleFrom) : (baseT ? baseT.sx : cur.sx)) || (baseT ? baseT.sx : cur.sx) || 1;
-        const sy0 = (entry.yScaleFrom != null ? Number(entry.yScaleFrom) : sx0) || sx0;
-        const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
-        const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
-        const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : (baseT ? baseT.tx : cur.tx)) || (baseT ? baseT.tx : cur.tx) || 0;
-        const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : (baseT ? baseT.ty : cur.ty)) || (baseT ? baseT.ty : cur.ty) || 0;
-        const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-        const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
+        const transform = baseT || cur;
+        const baseParams = entry._baseParams || null;
+        // Only inherit from previous [Image] params. If missing there too, default to 1.
+        const startScaleX = pickFinite(entry.xScaleFrom, baseParams && baseParams.xScale, 1);
+        const startScaleY = pickFinite(entry.yScaleFrom, baseParams && baseParams.yScale, startScaleX, 1);
+        const endScaleX = pickFinite(entry.xScaleTo, startScaleX);
+        const endScaleY = pickFinite(entry.yScaleTo, startScaleY, endScaleX);
+        // Only inherit from previous [Image] params. If missing there too, default to 0.
+        const startX = pickFinite(entry.xFrom, baseParams && baseParams.x, 0);
+        const endX = pickFinite(entry.xTo, startX);
+        const baseYParam = toFinite(baseParams && baseParams.y);
+        const fallbackY = 0;
+        const startYParam = entry.yFrom != null ? toFinite(entry.yFrom) : baseYParam;
+        const startYCss = entry.yFrom != null
+          ? (startYParam != null ? -startYParam : fallbackY)
+          : (baseYParam != null ? baseYParam : fallbackY);
+        const endYParam = entry.yTo != null ? toFinite(entry.yTo)
+          : (entry.yFrom != null ? startYParam : baseYParam);
+        let endYCss;
+        if(entry.yTo != null){
+          endYCss = endYParam != null ? -endYParam : (entry.yFrom != null ? startYCss : fallbackY);
+        } else if(entry.yFrom != null){
+          endYCss = startYCss;
+        } else {
+          endYCss = endYParam != null ? endYParam : startYCss;
+        }
         // Ensure browser registers initial transform before animating
         inner.style.transition = '';
-        const minS = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
+        const minS = Math.max(0.0001, Math.min(startScaleX, startScaleY, endScaleX, endScaleY));
         const overscan = minS < 1 ? (1 / minS) : 1;
-        inner.style.transform = `translate(${tx0}px, ${ty0}px) scale(${sx0 * overscan}, ${sy0 * overscan})`;
+        inner.style.transform = `translate(${startX}px, ${startYCss}px) scale(${startScaleX * overscan}, ${startScaleY * overscan})`;
         // Force reflow to commit initial state
         try{ void (inner.offsetWidth); }catch{}
         inner.style.transition = dur > 0 ? `transform ${dur}s linear` : '';
-        requestAnimationFrame(()=>{ inner && (inner.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscan}, ${sy1 * overscan})`); });
+        requestAnimationFrame(()=>{
+          if(!inner) return;
+          inner.style.transform = `translate(${endX}px, ${endYCss}px) scale(${endScaleX * overscan}, ${endScaleY * overscan})`;
+        });
+        const finalXParam = endX != null ? endX : startX;
+        const finalYParam = endYParam != null ? endYParam : (startYParam != null ? startYParam : (baseYParam != null ? baseYParam : fallbackY));
+        const finalScaleXParam = endScaleX != null ? endScaleX : startScaleX;
+        let finalScaleYParam = endScaleY != null ? endScaleY : startScaleY;
+        if(finalScaleYParam == null) finalScaleYParam = finalScaleXParam;
+        this._lastImageParams = {
+          x: finalXParam,
+          y: finalYParam != null ? finalYParam : 0,
+          xScale: finalScaleXParam != null ? finalScaleXParam : 1,
+          yScale: finalScaleYParam != null ? finalScaleYParam : (finalScaleXParam != null ? finalScaleXParam : 1),
+        };
       } else if(isBgTweenTag && this.bgTweenLayer && this.bgTweenInner){
         // BackgroundTween with no image: copy current [Background] layer content and animate it
         // Source is bgInner
@@ -835,25 +1136,52 @@
         requestAnimationFrame(()=>{ layer && (layer.style.opacity = '1'); });
         // Hide still bg layer after a short delay
         try{ setTimeout(()=>{ try{ if(this.bgLayer){ this.bgLayer.style.opacity = '0'; } }catch{} }, 250); }catch{}
-        // Apply tween transform
+        // Apply tween transform using base [Background] params only (no computed transform fallback)
         const dur = Number(entry.duration||0) || 0;
-        const cur = this._readTransformOf(srcInner);
-        const baseT = entry._baseTransform || null;
-        const sx0 = (entry.xScaleFrom != null ? Number(entry.xScaleFrom) : (baseT ? baseT.sx : cur.sx)) || (baseT ? baseT.sx : cur.sx) || 1;
-        const sy0 = (entry.yScaleFrom != null ? Number(entry.yScaleFrom) : sx0) || sx0;
-        const sx1 = (entry.xScaleTo != null ? Number(entry.xScaleTo) : sx0) || sx0;
-        const sy1 = (entry.yScaleTo != null ? Number(entry.yScaleTo) : sy0) || sy0;
-        const tx0 = (entry.xFrom != null ? Number(entry.xFrom) : (baseT ? baseT.tx : cur.tx)) || (baseT ? baseT.tx : cur.tx) || 0;
-        const ty0 = (entry.yFrom != null ? Number(entry.yFrom) : (baseT ? baseT.ty : cur.ty)) || (baseT ? baseT.ty : cur.ty) || 0;
-        const tx1 = (entry.xTo != null ? Number(entry.xTo) : tx0);
-        const ty1 = (entry.yTo != null ? Number(entry.yTo) : ty0);
+        const toFinite = (value) => {
+          if(value == null) return null;
+          const n = typeof value === 'number' ? value : Number(value);
+          return Number.isFinite(n) ? n : null;
+        };
+        const pickFinite = (...values) => {
+          for(let i = 0; i < values.length; i++){
+            const n = toFinite(values[i]);
+            if(n != null) return n;
+          }
+          return null;
+        };
+        const baseParams = entry._baseParams || null;
+        const startScaleX = pickFinite(entry.xScaleFrom, baseParams && baseParams.xScale, 1);
+        const startScaleY = pickFinite(entry.yScaleFrom, baseParams && baseParams.yScale, startScaleX, 1);
+        const endScaleX = pickFinite(entry.xScaleTo, startScaleX);
+        const endScaleY = pickFinite(entry.yScaleTo, startScaleY, endScaleX);
+        const startX = pickFinite(entry.xFrom, baseParams && baseParams.x, 0);
+        const endX = pickFinite(entry.xTo, startX);
+        const baseYParam = toFinite(baseParams && baseParams.y);
+        const fallbackY = 0;
+        const startYParam = entry.yFrom != null ? toFinite(entry.yFrom) : baseYParam;
+        // Background invert: when falling back to base y, flip sign for CSS
+        const baseYCss = (baseYParam != null ? -baseYParam : fallbackY);
+        const startYCss = entry.yFrom != null
+          ? (startYParam != null ? -startYParam : fallbackY)
+          : baseYCss;
+        const endYParam = entry.yTo != null ? toFinite(entry.yTo)
+          : (entry.yFrom != null ? startYParam : baseYParam);
+        let endYCss;
+        if(entry.yTo != null){
+          endYCss = endYParam != null ? -endYParam : (entry.yFrom != null ? startYCss : fallbackY);
+        } else if(entry.yFrom != null){
+          endYCss = startYCss;
+        } else {
+          endYCss = (endYParam != null ? -endYParam : startYCss);
+        }
         inner.style.transition = '';
-        const minS = Math.max(0.0001, Math.min(sx0, sy0, sx1, sy1));
+        const minS = Math.max(0.0001, Math.min(startScaleX, startScaleY, endScaleX, endScaleY));
         const overscan = minS < 1 ? (1 / minS) : 1;
-        inner.style.transform = `translate(${tx0}px, ${ty0}px) scale(${sx0 * overscan}, ${sy0 * overscan})`;
+        inner.style.transform = `translate(${startX}px, ${startYCss}px) scale(${startScaleX * overscan}, ${startScaleY * overscan})`;
         try{ void (inner.offsetWidth); }catch{}
         inner.style.transition = dur > 0 ? `transform ${dur}s linear` : '';
-        requestAnimationFrame(()=>{ inner && (inner.style.transform = `translate(${tx1}px, ${ty1}px) scale(${sx1 * overscan}, ${sy1 * overscan})`); });
+        requestAnimationFrame(()=>{ inner && (inner.style.transform = `translate(${endX}px, ${endYCss}px) scale(${endScaleX * overscan}, ${endScaleY * overscan})`); });
       } else {
         // Clear
         if(tag === 'background' && this.bgLayer && this.bgInner && fade > 0){
@@ -868,7 +1196,7 @@
             });
             this._pendingBgTimer = setTimeout(()=>{
               this._pendingBgTimer = null;
-              if(this.bgInner){ this.bgInner.style.backgroundImage = 'none'; }
+              if(this.bgInner){ this.bgInner.style.backgroundImage = 'none'; this.bgInner.style.transform = 'translate(0px, 0px) scale(1, 1)'; this.bgInner.style.transition = ''; }
               // Keep body clear
               root.style.backgroundImage = 'none';
             }, Math.max(0, fade) * 1000);
@@ -886,6 +1214,7 @@
             l0.style.opacity = '0'; l1.style.opacity = '0';
             if(i0){ i0.style.backgroundImage = 'none'; } if(i1){ i1.style.backgroundImage = 'none'; }
           }
+          this._lastImageParams = null;
           this._imageActiveIndex = 0;
           if(this.tweenLayer){ this.tweenLayer.style.transition = `opacity ${fadeDur}s ease`; this.tweenLayer.style.opacity = '0'; }
           if(this.tweenContent){
@@ -948,13 +1277,17 @@
     }
     applyCurtain(entry){
       const layer = this.curtainLayer;
-      if(!layer || !this.curtainTop || !this.curtainBottom){ return; }
+      if(!layer || !this.curtainTop || !this.curtainBottom || !this.curtainLeft || !this.curtainRight){ return; }
       if(!entry){
         try{
           this.curtainTop.style.transition = 'height 0.25s linear';
           this.curtainTop.style.height = '0%';
           this.curtainBottom.style.transition = 'height 0.25s linear';
           this.curtainBottom.style.height = '0%';
+          this.curtainLeft.style.transition = 'width 0.25s linear';
+          this.curtainLeft.style.width = '0%';
+          this.curtainRight.style.transition = 'width 0.25s linear';
+          this.curtainRight.style.width = '0%';
         }catch{}
         return;
       }
@@ -962,13 +1295,26 @@
       const from = Math.max(0, Math.min(1, Number(entry.fillFrom||0) || 0));
       const to = Math.max(0, Math.min(1, Number(entry.fillTo||0) || 0));
       const fade = Math.max(0, Number(entry.fadeTime||0) || 0);
-      const target = (dir === 4) ? this.curtainTop : this.curtainBottom;
+      // 0: bottom, 4: top, 2: left, 6: right
+      let target = this.curtainBottom;
+      let prop = 'height';
+      if(dir === 4){ target = this.curtainTop; prop = 'height'; }
+      else if(dir === 2){ target = this.curtainLeft; prop = 'width'; }
+      else if(dir === 6){ target = this.curtainRight; prop = 'width'; }
       try{
         target.style.transition = '';
-        target.style.height = `${from * 100}%`;
+        if(prop === 'height'){
+          target.style.height = `${from * 100}%`;
+        } else {
+          target.style.width = `${from * 100}%`;
+        }
         requestAnimationFrame(()=>{
-          target.style.transition = `height ${fade}s linear`;
-          target.style.height = `${to * 100}%`;
+          target.style.transition = `${prop} ${fade}s linear`;
+          if(prop === 'height'){
+            target.style.height = `${to * 100}%`;
+          } else {
+            target.style.width = `${to * 100}%`;
+          }
         });
       }catch{}
       // UI hide handled by app.js via planTransition when block=true
@@ -1095,6 +1441,16 @@
               if(tag === 'backgroundtween' && bt==='background'){ base = e; break; }
             }
           }
+          // Attach base params from the immediately preceding Image/Background
+          if(base){
+            const toNum = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+            entry._baseParams = {
+              x: toNum(base.x),
+              y: toNum(base.y),
+              xScale: toNum(base.xScale),
+              yScale: toNum(base.yScale),
+            };
+          }
           const fade = base && Number.isFinite(Number(base.fadeTime)) ? Number(base.fadeTime) : 0;
           const sameAsset = base && (this._assetKey(base) === this._assetKey(entry));
           if(base && sameAsset && fade > 0){
@@ -1110,6 +1466,13 @@
               const tx = (base.x != null ? Number(base.x) : 0) || 0;
               const ty = (base.y != null ? Number(base.y) : 0) || 0;
               entry._baseTransform = { tx, ty, sx, sy };
+              // Also attach explicit base params for tween precedence
+              entry._baseParams = {
+                x: Number.isFinite(tx) ? tx : null,
+                y: Number.isFinite(ty) ? ty : null,
+                xScale: Number.isFinite(sx) ? sx : null,
+                yScale: Number.isFinite(sy) ? sy : null,
+              };
             }catch{}
             const remaining = this._blockerGateUntil ? Math.max(0, this._blockerGateUntil - Date.now()) : Math.max(0, fade*1000);
             if(remaining <= 0){

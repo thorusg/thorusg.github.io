@@ -145,6 +145,7 @@
       this.currentEntry = null;
       this.currentState = null;
       this._activeSfx = new Set();
+      this._unlocked = false;
     }
 
     setVariables(map){
@@ -154,6 +155,27 @@
     reset(){
       this.stop(0);
       this.currentEntry = null;
+    }
+
+    // Attempt to unlock audio autoplay by performing a muted play
+    // in response to a user gesture; retries current track afterwards.
+    unlock(){
+      if(this._unlocked) return;
+      this._unlocked = true;
+      try{
+        const a = new Audio();
+        a.muted = true;
+        // some browsers need a source; use a short, empty data URI
+        // but it's acceptable to call play() without setting src
+        const p = a.play();
+        if(p && typeof p.finally === 'function'){
+          p.finally(()=>{ try{ a.pause(); }catch{} });
+        } else {
+          try{ a.pause(); }catch{}
+        }
+      }catch{}
+      // Re-apply current track if any
+      try{ if(this.currentEntry){ this.apply(this.currentEntry); } }catch{}
     }
 
     apply(entry){
