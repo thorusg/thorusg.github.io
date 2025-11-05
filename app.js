@@ -1,7 +1,7 @@
   // Base path to local data (no example deps)
   const SERVER_STRING = 'en_US';
   // Base to story data (JSON + txt). Replace this with a raw GitHub URL if desired.
-  const DATA_BASE = `https://raw.githubusercontent.com/Kengxxiao/ArknightsGameData_YoStar/main/${SERVER_STRING}`;
+  const DATA_BASE = `/content/Kengxxiao/${SERVER_STRING}`;
   // Base to static assets (images, audio, etc.). Replace this to point to a CDN/raw URL when needed.
   const DATA_ASSETS = `https://raw.githubusercontent.com/akgcc/arkdata/main/assets/`;
   // Expose assets base for other modules loaded on the page, but don't overwrite if set early in index.html
@@ -94,6 +94,17 @@
   let lastRenderedViewIndex = -1;
   let pendingEffectTimers = [];
   let textRevealRafId = null;
+  // Responsive scaling: match background's contain scale for a 16:9 canvas
+  function updateViewportScale(){
+    try{
+      const baseW = 1920; // logical background width
+      const baseH = 1080; // logical background height
+      const s = Math.min((window.innerWidth||baseW)/baseW, (window.innerHeight||baseH)/baseH) || 1;
+      document.documentElement.style.setProperty('--viewport-scale', String(s));
+    }catch{}
+  }
+  updateViewportScale();
+  window.addEventListener('resize', updateViewportScale);
 
   function cancelTextReveal(){
     if(textRevealRafId){ try{ cancelAnimationFrame(textRevealRafId); }catch{} textRevealRafId = null; }
@@ -386,7 +397,11 @@
     }
   }
 
+  // Prevent race conditions when switching levels quickly
+  let currentLoadToken = 0;
+
   async function loadLevel(storyTxt){
+    const myToken = ++currentLoadToken;
     setStatus('Loading level...');
     // Hard reset any in-flight scheduled ops first
     clearPendingEffects();
@@ -414,6 +429,8 @@
       const res = await fetch(url, { cache: 'no-store' });
       if(!res.ok) throw new Error('Failed to load level file');
       const text = await res.text();
+      // If a newer load started while we awaited, ignore this result
+      if(myToken !== currentLoadToken) return;
       selections = {};
       dialogues = parseStructuredDialogues(text);
       view = computeVisible(dialogues, selections);
@@ -422,10 +439,10 @@
       lastRenderedViewIndex = -1;
       clearPendingEffects();
       updateCurrent();
-      setStatus('');
+      if(myToken === currentLoadToken) setStatus('');
     }catch(err){
       console.error(err);
-      setStatus('Failed to load level');
+      if(myToken === currentLoadToken) setStatus('Failed to load level');
       renderDialogues([]);
       if(backgroundController){ backgroundController.reset(); }
       if(audioController){ audioController.reset(); }
@@ -742,11 +759,11 @@
       const it = dialogues[i];
       if(!it) continue;
       if(it.guard && !isGuardSatisfied(it.guard, selections)) continue;
-      // Schedule character-layer updates exactly when they appear in the timeline,
-      // so character swaps take effect during blockers/delays between visible lines.
+      // Do not schedule per-[Character]/[charslot] ops here.
+      // Character state is resolved and applied once when rendering the next visible item
+      // so multiple consecutive [charslot] directives appear together.
       if(it.type === 'character' || it.type === 'charslot'){
-        plan.ops.push({ atMs: t, type: 'character', entry: it });
-        // Character ops do not affect overall wait/hide timing
+        // Skip scheduling; handled by renderCurrentCore via characterController.applyFor
         continue;
       }
       if(it.type === 'sound'){
