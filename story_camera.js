@@ -64,7 +64,20 @@
       const start = performance.now();
       const ms = dur * 1000;
       const prevTransforms = new Map();
-      for(const el of elements){ prevTransforms.set(el, el && el.style ? (el.style.transform || '') : ''); }
+      for(const el of elements){
+        if(!el || !el.style) continue;
+        const inlineVal = el.style.transform || '';
+        let computedVal = '';
+        if(!inlineVal && typeof global.getComputedStyle === 'function'){
+          try{
+            const style = global.getComputedStyle(el);
+            if(style){
+              computedVal = style.transform || (typeof style.getPropertyValue === 'function' ? style.getPropertyValue('transform') : '') || '';
+            }
+          }catch{}
+        }
+        prevTransforms.set(el, { inline: inlineVal, computed: computedVal });
+      }
       let lastTick = start;
       const step = (now) => {
         const t = now - start;
@@ -84,12 +97,24 @@
         const dy = (Math.random()*2 - 1 + ry) * ys * amp;
         for(const el of elements){
           if(!el || !el.style) continue;
-          const base = prevTransforms.get(el) || '';
-          el.style.transform = `${base} translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px)`;
+          const prev = prevTransforms.get(el) || { inline: '', computed: '' };
+          const base = prev.inline && prev.inline !== 'none'
+            ? prev.inline
+            : (prev.computed && prev.computed !== 'none' ? prev.computed : '');
+          const translation = `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px)`;
+          el.style.transform = base ? `${base} ${translation}` : translation;
         }
         if(p < 1){ this._raf = requestAnimationFrame(step); }
         else {
-          for(const el of elements){ if(el && el.style){ el.style.transform = prevTransforms.get(el) || ''; } }
+          for(const el of elements){
+            if(!el || !el.style) continue;
+            const prev = prevTransforms.get(el);
+            if(prev && prev.inline != null && prev.inline !== ''){
+              el.style.transform = prev.inline;
+            } else {
+              el.style.removeProperty('transform');
+            }
+          }
         }
       };
       if(this._raf){ try{ cancelAnimationFrame(this._raf);}catch{} }
@@ -99,7 +124,11 @@
     reset(elements){
       if(this._raf){ try{ cancelAnimationFrame(this._raf);}catch{} this._raf = null; }
       const list = Array.isArray(elements) ? elements : [];
-      for(const el of list){ if(el && el.style){ try{ el.style.transform = ''; }catch{} } }
+      for(const el of list){
+        if(el && el.style){
+          try{ el.style.removeProperty('transform'); }catch{}
+        }
+      }
     }
   }
 

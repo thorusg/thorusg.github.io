@@ -17,44 +17,6 @@
   <script defer src="story_camera.js"></script>
   <script defer src="story_effects.js"></script>
   <script defer src="app.js"></script>
-  <script>
-    // Lightweight live-reload for sprite-recttransform.css without page refresh
-    (function(){
-      var host = (window.location && window.location.hostname) || '';
-      var shouldEnable = !!(window.ENABLE_SPRITE_DEV_RELOAD || /^localhost$|^127\.0\.0\.1$/.test(host));
-      if(!shouldEnable) return;
-      var CSS_PATH = 'sprite-recttransform.css';
-      var link = document.getElementById('spriteCss');
-      if(!link) return;
-      var lastTag = null;
-      var lastLen = null;
-      async function check(){
-        try{
-          // Prefer HEAD for Last-Modified / ETag
-          var res = await fetch(CSS_PATH, { method: 'HEAD', cache: 'no-store' });
-          if(res && res.ok){
-            var tag = res.headers.get('ETag') || res.headers.get('Last-Modified');
-            if(tag && lastTag && tag !== lastTag){
-              link.href = CSS_PATH + '?v=' + Date.now();
-            }
-            if(tag) lastTag = tag;
-            return;
-          }
-        } catch(_){}
-        // Fallback: GET and compare length (cache-busted)
-        try{
-          var res2 = await fetch(CSS_PATH + '?rand=' + Date.now(), { cache: 'no-store' });
-          if(res2 && res2.ok){
-            var txt = await res2.text();
-            var len = txt.length;
-            if(lastLen != null && len !== lastLen){ link.href = CSS_PATH + '?v=' + Date.now(); }
-            lastLen = len;
-          }
-        } catch(_){}
-      }
-      setInterval(check, 1000); // check every second
-    })();
-  </script>
   <noscript>This page requires JavaScript to function.</noscript>
 </head>
 <body>
@@ -81,7 +43,7 @@
       <span id="speedValue" class="muted"></span>
     </label>
     <label>
-      Player name:
+      Doctor's name:
       <input id="playerName" type="text" placeholder="{@nickname}" maxlength="32" />
     </label>
     <span id="status" class="muted"></span>

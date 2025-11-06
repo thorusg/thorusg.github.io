@@ -121,8 +121,6 @@
     side: 'Side Story',
     mini: 'Vignette',
     record: 'Operator Record',
-    // reserved for future expansion
-    module: 'Operator Module',
     rogue: 'Integrated Strategies',
   };
   const CATEGORY_ORDER = ['main', 'side', 'mini', 'record', 'rogue'];
@@ -1009,6 +1007,18 @@
     const endPos = dialogues ? dialogues.indexOf(nextVisibleItem) : -1;
     const startPos = prevVisibleItem && dialogues ? dialogues.indexOf(prevVisibleItem) : -1;
     if(endPos < 0) return plan;
+    const isSimpleCharacterEntry = (entry) => {
+      if(!entry) return false;
+      if(entry.type === 'charslot'){
+        if(entry.hasDirective) return false;
+        if(entry.hasEffects) return false;
+        return true;
+      }
+      if(entry.type === 'character'){
+        return !entry.clear;
+      }
+      return false;
+    };
     let t = 0;
     let lastPlainImage = null; // last [Image] (not ImageTween) in this window
     let lastPlainBackground = null; // last [Background] (not BackgroundTween) in this window
@@ -1042,6 +1052,7 @@
 
         // For non-clear character/slot updates at the same timestamp, replace the last
         // non-clear character op while preserving any earlier clear ops at that time.
+        const newIsSimple = isSimpleCharacterEntry(it);
         let replaced = false;
         for(let k = plan.ops.length - 1; k >= 0; k--){
           const op = plan.ops[k];
@@ -1052,9 +1063,12 @@
             const opIsClear = ((opEntry.type === 'charslot') && !opEntry.slot && !opEntry.name && !opEntry.hasDirective)
               || ((opEntry.type === 'character') && !!opEntry.clear);
             if(!opIsClear && op.atMs === t){
-              plan.ops[k] = { atMs: t, type: 'character', entry: it };
-              replaced = true;
-              break;
+              const opIsSimple = isSimpleCharacterEntry(opEntry);
+              if(opIsSimple && newIsSimple){
+                plan.ops[k] = { atMs: t, type: 'character', entry: it };
+                replaced = true;
+                break;
+              }
             }
           }
         }

@@ -117,7 +117,7 @@ input[type="range"] {
   /* Default pivot is feet at center */
   transform-origin: center;
   /* base zoom (user-set) multiplied by per-[charslot] zoom */
-  --sprite-zoom: 1.4;           /* user-configurable base zoom */
+  --sprite-zoom: 1.3;           /* user-configurable base zoom */
   --sprite-zoom-extra: 1;        /* per-[charslot] zoom multiplier */
   /* optional per-sprite offsets; positive Y moves down */
   --sprite-translate-x: 0px;
