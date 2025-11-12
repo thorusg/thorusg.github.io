@@ -698,7 +698,7 @@
             if(fromLayer){ fromLayer.style.opacity = '0'; }
             if(fromContent){ fromContent.style.backgroundImage = 'none'; fromContent.style.transition = ''; fromContent.style.transform = 'translate(0px, 0px) scale(1, 1)'; }
             // keep top z-index on active
-            toLayer.style.zIndex = '5';
+            toLayer.style.zIndex = '6';
             this._imageActiveIndex = toIdx;
           };
           if(fade > 0){ this._pendingImageSwapTimer = setTimeout(()=>{ this._pendingImageSwapTimer = null; done(); }, fade * 1000); }
