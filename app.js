@@ -1806,26 +1806,24 @@
   }
   nextBtn.addEventListener('click', () => { goNext(); });
 
-  // Advance on click anywhere except the header and interactive controls
-  document.addEventListener('click', (e) => {
-    try{
-      // Ignore if selecting text
-      const sel = window.getSelection ? window.getSelection() : null;
-      if(sel && typeof sel.toString === 'function' && sel.toString().length > 0){ return; }
-      // Ignore clicks inside header
-      const headerEl = document.querySelector('header');
-      if(headerEl && headerEl.contains(e.target)) return;
-      // Ignore clicks on controls/buttons to avoid double-advance
-      if(controlsEl && controlsEl.contains(e.target)) return;
-      const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
-      if(tag === 'button' || tag === 'select' || tag === 'input' || tag === 'textarea' || tag === 'a' || tag === 'label') return;
-      // Ignore clicks inside open log modal
-      if(logModal && logModal.style.display === 'flex' && logModal.contains(e.target)) return;
-      // Ignore clicks on choice buttons (decisions)
-      if(choicesEl && choicesEl.contains(e.target)) return;
-      goNext();
-    }catch{}
-  }, true);
+  // Advance on space anywhere except the header and interactive controls
+  document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space') {
+    return; 
+  }
+  try {
+    const activeEl = document.activeElement;
+    if (activeEl) {
+      const tag = activeEl.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        return;
+      }
+    }
+    e.preventDefault();
+    goNext();
+  } catch (err) {
+  }
+}, true);
 
   // Helper: highlight the current line in the log
   function highlightLogCurrent(){
