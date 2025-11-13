@@ -17,13 +17,16 @@
     ru_RU: 'RU (ru_RU)'
   };
 
-  let currentServer = SERVER_STRING;
+  const BASE_STORY = 'https://raw.githubusercontent.com/Kengxxiao/ArknightsGameData_YoStar/main/';
+  const SPECIAL_STORY = {
+    'zh_CN': 'https://raw.githubusercontent.com/Kengxxiao/ArknightsGameData/master/',
+    'ru_RU': 'https://raw.githubusercontent.com/thorusg/ArknightsGameData_YoStar/main/'
+  };
   function getDataBase(){
-    if(currentServer === 'zh_CN'){
-      return `https://raw.githubusercontent.com/Kengxxiao/ArknightsGameData/master/${currentServer}`;
-    }
-    return `https://raw.githubusercontent.com/thorusg/ArknightsGameData_YoStar/main/${currentServer}`;
+    const baseUrl = SPECIAL_STORY[currentServer] || BASE_STORY;
+    return `${baseUrl}${currentServer}`;
   }
+
   const serverSelect = document.getElementById('serverSelect');
   const categorySelect = document.getElementById('categorySelect');
   const chapterSelect = document.getElementById('chapterSelect');
